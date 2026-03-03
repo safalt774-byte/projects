@@ -43,7 +43,7 @@ class FretboardHighwayPainter extends CustomPainter {
     final double boardLeft = labelW;
     final double boardTop  = topPad;
     final double boardW    = size.width - labelW - 8;
-    final double boardH    = size.height - topPad - botPad;
+    final double boardH    = (size.height - topPad - botPad).clamp(120.0, double.infinity);
 
     final double stringGap = boardH / 5;
     final double fretGap   = boardW / numFrets;
