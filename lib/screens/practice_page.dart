@@ -88,6 +88,12 @@ class _PracticePageState extends State<PracticePage>
   int          _preloadedPageIdx   = -1;  // idx of the ready pre-loaded player
   int          _preloadingForIdx   = -1;  // idx currently being async-loaded
 
+  // ── Combined audio (single player for all pages) ───────────
+  bool   _hasCombinedAudio = false;
+  String? _combinedAudioPath;
+  List<double> _combinedPageOffsets = [];  // real WAV offsets from backend
+  bool   _combiningAudio = false;
+
   bool _audioLoading  = true;
   bool _isPlaying     = false;
   bool _finished      = false;       // entire song finished (last page done)
@@ -386,7 +392,17 @@ class _PracticePageState extends State<PracticePage>
 
     final nextIdx = _activePageIdx + 1;
 
-    // If next page is ready → auto-advance seamlessly (no ticker stop)
+    // ★ If combined audio is ready, switch to it — seamless, no gap
+    if (_hasCombinedAudio && _combinedAudioPath != null) {
+      debugPrint('🔀 Page ${_activePageIdx + 1} done → switching to combined audio');
+      final seekTo = nextIdx < _combinedPageOffsets.length
+          ? _combinedPageOffsets[nextIdx]
+          : 0.0;
+      _switchToCombinedAudio(seekToMs: seekTo);
+      return;
+    }
+
+    // If next page is ready → auto-advance (per-page fallback)
     if (nextIdx < _pages.length && _pages[nextIdx].audioReady) {
       debugPrint('🎵 Auto-advancing to page ${nextIdx + 1}');
       _autoAdvanceToPage(nextIdx);
@@ -396,7 +412,6 @@ class _PracticePageState extends State<PracticePage>
     // No next page ready → song is done (or still processing)
     _clock.stop();
     if (_ticker.isActive) _ticker.stop();
-    // Orphan-dispose player in background
     _posSub?.cancel();
     _completeSub?.cancel();
     _posSub = null;
@@ -561,6 +576,9 @@ class _PracticePageState extends State<PracticePage>
 
       if (_nextPageToLoad <= widget.totalPages && mounted) {
         _loadNextPage();
+      } else if (mounted && !_hasCombinedAudio && !_combiningAudio) {
+        // All pages loaded → combine audio into one file
+        _fetchCombinedAudio();
       }
     } catch (e) {
       debugPrint('⚠️ Page $pageNum failed: $e');
@@ -573,6 +591,160 @@ class _PracticePageState extends State<PracticePage>
         _pageRetryCount = 0;
         _nextPageToLoad = pageNum + 1;
         if (_nextPageToLoad <= widget.totalPages && mounted) _loadNextPage();
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  COMBINED AUDIO (single player for all pages)
+  // ══════════════════════════════════════════════════════════
+
+  Future<void> _fetchCombinedAudio() async {
+    if (_combiningAudio || _hasCombinedAudio) return;
+    _combiningAudio = true;
+    debugPrint('🔗 Requesting combined audio from backend...');
+
+    try {
+      final result = await ApiService.combineAudio(widget.jobId);
+      if (!mounted) return;
+
+      String? path;
+      if (result.audioBase64 != null && result.audioBase64!.isNotEmpty) {
+        path = await _saveBase64(result.audioBase64!);
+      }
+      path ??= await _downloadWav(result.audioUrl);
+
+      if (path != null && mounted) {
+        _combinedAudioPath = path;
+        _combinedPageOffsets = result.pageOffsetsMs;
+        _hasCombinedAudio = true;
+        _combiningAudio = false;
+        debugPrint('✅ Combined audio ready: ${result.pageOffsetsMs.length} pages, path=$path');
+
+        // If we're currently between pages or the song finished waiting,
+        // switch immediately.
+        if (_finished || !_isPlaying) {
+          // Don't auto-switch mid-playback; wait for page complete
+        }
+      }
+    } catch (e) {
+      debugPrint('⚠️ Combined audio failed: $e');
+      _combiningAudio = false;
+    }
+  }
+
+  /// Switch to the combined audio file, seeking to the current global position.
+  Future<void> _switchToCombinedAudio({double? seekToMs}) async {
+    if (!_hasCombinedAudio || _combinedAudioPath == null) return;
+
+    debugPrint('🔀 Switching to combined audio player');
+
+    // Stop current per-page player
+    _posSub?.cancel();
+    _completeSub?.cancel();
+    _posSub = null;
+    _completeSub = null;
+    final old = _player;
+    _player = null;
+    if (old != null) {
+      Future.microtask(() async {
+        try { await old.stop(); } catch (_) {}
+        try { old.dispose(); } catch (_) {}
+      });
+    }
+
+    // Dispose preloaded player — no longer needed
+    try { _preloadedPlayer?.dispose(); } catch (_) {}
+    _preloadedPlayer = null;
+    _preloadedPageIdx = -1;
+    _preloadingForIdx = -1;
+
+    // Create single player for entire song
+    final player = AudioPlayer();
+    _player = player;
+
+    _posSub = player.onPositionChanged.listen((pos) {
+      if (!mounted || _player != player) return;
+      final newPos = pos.inMilliseconds.toDouble();
+      final effectivePos = _audioPosMs + _clock.elapsedMilliseconds * _playbackRate;
+      if (newPos >= effectivePos) {
+        _audioPosMs = newPos;
+        _clock.reset();
+        _clock.start();
+      }
+
+      // Update active page based on combined offsets
+      for (int i = _combinedPageOffsets.length - 1; i >= 0; i--) {
+        if (newPos >= _combinedPageOffsets[i]) {
+          if (_activePageIdx != i) {
+            _activePageIdx = i;
+            debugPrint('📄 Combined audio: now on page ${i + 1}');
+          }
+          break;
+        }
+      }
+    });
+
+    _completeSub = player.onPlayerComplete.listen((_) {
+      if (!mounted || _player != player) return;
+      debugPrint('🏁 Combined audio complete');
+      _clock.stop();
+      if (_ticker.isActive) _ticker.stop();
+      if (mounted) {
+        setState(() {
+          _isPlaying = false;
+          _finished  = true;
+        });
+      }
+    });
+
+    try {
+      await player.setSource(DeviceFileSource(_combinedAudioPath!));
+      await player.setPlaybackRate(_playbackRate);
+
+      // Rebuild timeline using the REAL backend offsets
+      _rebuildTimelineWithCombinedOffsets();
+
+      final seekMs = seekToMs ?? _songPosMs;
+      if (seekMs > 0) {
+        await player.seek(Duration(milliseconds: seekMs.round()));
+      }
+      _audioPosMs = seekMs;
+      _songPosMs = seekMs;
+
+      await player.resume();
+      _clock.reset();
+      _clock.start();
+
+      setState(() {
+        _isPlaying = true;
+        _finished = false;
+      });
+      if (!_ticker.isActive) _ticker.start();
+
+      debugPrint('▶️ Combined audio playing from ${seekMs.round()}ms');
+    } catch (e) {
+      debugPrint('❌ Combined audio playback failed: $e');
+    }
+  }
+
+  /// Rebuild the note timeline using the real WAV offsets from the backend.
+  void _rebuildTimelineWithCombinedOffsets() {
+    if (_combinedPageOffsets.length != _pages.length) return;
+
+    _allNotes = [];
+    _pageOffsets.clear();
+    for (int i = 0; i < _pages.length; i++) {
+      final offset = _combinedPageOffsets[i];
+      _pageOffsets.add(offset);
+      for (final n in _pages[i].notes) {
+        _allNotes.add(NoteEvent(
+          pitch: n.pitch,
+          startMs: n.startMs + offset,
+          durationMs: n.durationMs,
+          stringIndex: n.stringIndex,
+          fret: n.fret,
+        ));
       }
     }
   }
@@ -617,7 +789,11 @@ class _PracticePageState extends State<PracticePage>
   }
 
   Future<void> _replayFromStart() async {
-    await _jumpToPage(0);
+    if (_hasCombinedAudio) {
+      await _switchToCombinedAudio(seekToMs: 0);
+    } else {
+      await _jumpToPage(0);
+    }
   }
 
   Future<void> _setTempo(double rate) async {

@@ -199,4 +199,44 @@ class ApiService {
     await startPageProcessing(jobId, pageNum);
     return pollPageUntilDone(jobId, pageNum);
   }
+
+  /// Request the backend to concatenate all per-page WAVs into one file.
+  /// Returns the combined audio URL/base64 and per-page time offsets.
+  static Future<CombinedAudioResult> combineAudio(String jobId) async {
+    final uri = Uri.parse('$baseUrl/combine-audio/?job_id=$jobId');
+
+    final response = await http.get(uri, headers: _headers).timeout(
+      const Duration(seconds: 60),
+      onTimeout: () => throw Exception('Combine audio timed out'),
+    );
+
+    if (response.statusCode != 200) {
+      try {
+        throw Exception(jsonDecode(response.body)['detail'] ?? response.body);
+      } catch (_) {
+        throw Exception(response.body);
+      }
+    }
+
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    final offsets = (json['pageOffsetsMs'] as List).map((e) => (e as num).toDouble()).toList();
+
+    return CombinedAudioResult(
+      audioUrl: '$baseUrl/${json['audioUrl']}',
+      audioBase64: json['audioBase64'] as String?,
+      pageOffsetsMs: offsets,
+    );
+  }
+}
+
+class CombinedAudioResult {
+  final String audioUrl;
+  final String? audioBase64;
+  final List<double> pageOffsetsMs;
+
+  const CombinedAudioResult({
+    required this.audioUrl,
+    this.audioBase64,
+    required this.pageOffsetsMs,
+  });
 }

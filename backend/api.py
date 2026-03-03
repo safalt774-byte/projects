@@ -5,6 +5,8 @@ import subprocess
 import time
 import asyncio
 import base64
+import wave
+import struct
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -404,6 +406,102 @@ async def page_status(job_id: str, page_num: int):
         return task["result"]
     else:
         raise HTTPException(status_code=500, detail=task.get("error", "Unknown error"))
+
+
+@app.get("/combine-audio/")
+async def combine_audio(job_id: str):
+    """
+    Concatenate all per-page WAV files into one combined WAV.
+    Returns the combined file path and per-page duration offsets (in ms)
+    so the Flutter app can use a SINGLE AudioPlayer for the entire song.
+    """
+    job_dir = os.path.join(OUTPUT_DIR, job_id)
+    if not os.path.exists(job_dir):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    combined_path = os.path.join(job_dir, "combined.wav")
+
+    # If already combined, return cached result
+    offsets_path = os.path.join(job_dir, "page_offsets.txt")
+    if os.path.exists(combined_path) and os.path.exists(offsets_path):
+        with open(offsets_path, "r") as f:
+            offsets = [float(x) for x in f.read().strip().split(",") if x]
+        audio_b64 = read_wav_as_base64(combined_path)
+        return {
+            "audioUrl": f"audio/{job_id}/combined.wav",
+            "audioBase64": audio_b64,
+            "pageOffsetsMs": offsets,
+        }
+
+    # Find all page WAVs in order
+    page_wavs = []
+    page_num = 1
+    while True:
+        # Check page subdirectory first, then job root
+        wav_path = os.path.join(job_dir, f"page_{page_num}", f"page_{page_num}.wav")
+        if not os.path.exists(wav_path):
+            wav_path = os.path.join(job_dir, f"page_{page_num}.wav")
+        if not os.path.exists(wav_path):
+            break
+        page_wavs.append(wav_path)
+        page_num += 1
+
+    # Also check for single-page job (no page_ prefix)
+    if not page_wavs:
+        single = os.path.join(job_dir, f"{job_id}.wav")
+        if os.path.exists(single):
+            audio_b64 = read_wav_as_base64(single)
+            return {
+                "audioUrl": f"audio/{job_id}/{job_id}.wav",
+                "audioBase64": audio_b64,
+                "pageOffsetsMs": [0.0],
+            }
+        raise HTTPException(status_code=404, detail="No audio files found")
+
+    print(f"🔗 Combining {len(page_wavs)} WAV files for job {job_id}")
+
+    # Read all WAV data and concatenate PCM frames
+    offsets_ms = []
+    all_frames = b""
+    params = None
+    current_offset_ms = 0.0
+
+    for i, wp in enumerate(page_wavs):
+        try:
+            with wave.open(wp, "rb") as wf:
+                if params is None:
+                    params = wf.getparams()
+                n_frames = wf.getnframes()
+                frames = wf.readframes(n_frames)
+                duration_ms = (n_frames / wf.getframerate()) * 1000.0
+                offsets_ms.append(current_offset_ms)
+                all_frames += frames
+                current_offset_ms += duration_ms
+                print(f"  Page {i+1}: {n_frames} frames, {duration_ms:.0f}ms, offset={offsets_ms[-1]:.0f}ms")
+        except Exception as e:
+            print(f"  ⚠️ Error reading {wp}: {e}")
+            raise HTTPException(status_code=500, detail=f"Error reading page {i+1} audio: {e}")
+
+    # Write combined WAV
+    with wave.open(combined_path, "wb") as wf:
+        wf.setparams(params)
+        wf.writeframes(all_frames)
+
+    total_frames = len(all_frames) // (params.sampwidth * params.nchannels)
+    total_ms = (total_frames / params.framerate) * 1000.0
+    print(f"✅ Combined: {total_frames} frames, {total_ms:.0f}ms, {len(page_wavs)} pages")
+
+    # Cache offsets
+    with open(offsets_path, "w") as f:
+        f.write(",".join(str(o) for o in offsets_ms))
+
+    audio_b64 = read_wav_as_base64(combined_path)
+
+    return {
+        "audioUrl": f"audio/{job_id}/combined.wav",
+        "audioBase64": audio_b64,
+        "pageOffsetsMs": offsets_ms,
+    }
 
 
 @app.get("/health")
