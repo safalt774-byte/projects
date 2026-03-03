@@ -237,10 +237,15 @@ class _PracticePageState extends State<PracticePage>
 
     _posSub = player.onPositionChanged.listen((pos) {
       if (!mounted) return;
-      // _audioPosMs is GLOBAL: page offset + local audio position
-      _audioPosMs = _activePageOffset + pos.inMilliseconds.toDouble();
-      _clock.reset();
-      _clock.start();
+      // Only move _audioPosMs forward — ignore duplicate pos=0 events that
+      // the audio player emits when it actually starts decoding, which would
+      // otherwise reset the clock backward and cause the visible replay.
+      final newPos = _activePageOffset + pos.inMilliseconds.toDouble();
+      if (newPos > _audioPosMs) {
+        _audioPosMs = newPos;
+        _clock.reset();
+        _clock.start();
+      }
       if (!firstPos.isCompleted) {
         debugPrint('🔊 Audio confirmed: page ${pg.pageNum} @ ${pos.inMilliseconds}ms (global=${_audioPosMs}ms)');
         firstPos.complete();
@@ -347,10 +352,10 @@ class _PracticePageState extends State<PracticePage>
     final ok = await _playPageAudio(pageIdx);
 
     if (ok) {
-      // ★ FIX 4: Re-sync positions *after* audio confirms playing.
-      _songPosMs  = pageStart;
-      _audioPosMs = pageStart;
-      _clock.reset();
+      // _posSub listener already maintains _audioPosMs and the clock.
+      // Resetting them here would overwrite real audio progress and cause
+      // the animation to jump backward ("replay") when the next pos event fires.
+      // Just ensure the clock is ticking (no-op if _posSub already started it).
       _clock.start();
       setState(() {
         _jumpingToPage = false;
@@ -395,9 +400,7 @@ class _PracticePageState extends State<PracticePage>
     final ok = await _playPageAudio(pageIdx);
 
     if (ok) {
-      _audioPosMs = globalStart;
-      _clock.reset();
-      _clock.start();
+      _clock.start(); // no-op if _posSub already started it; guards the timeout path
       setState(() {
         _isPlaying     = true;
         _finished      = false;
@@ -490,8 +493,7 @@ class _PracticePageState extends State<PracticePage>
       _songPosMs = _activePageOffset; _audioPosMs = _activePageOffset;
       final ok = await _playPageAudio(_activePageIdx);
       if (ok) {
-        _audioPosMs = _activePageOffset;
-        _clock.reset(); _clock.start();
+        _clock.start(); // no-op if _posSub already started it
         setState(() { _isPlaying = true; _jumpingToPage = false; });
         if (!_ticker.isActive) _ticker.start();
       } else {
