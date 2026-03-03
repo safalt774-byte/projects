@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "641981354055",
+    "project_id": "guitartabt-d632a",
+    "storage_bucket": "guitartabt-d632a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:641981354055:android:d708572ceac943acad6162",
+        "android_client_info": {
+          "package_name": "com.example.projects"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCClvur0B-J2oHZ7x_uFmDAzk7Z7m3PeR8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

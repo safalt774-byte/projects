@@ -1,0 +1,49 @@
+name: projects
+description: Guitar Tab Tutor - Learn guitar with AI-powered sheet music recognition
+
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # ── File & Storage ──────────────────────────────────────
+  file_picker: ^8.0.0
+  path_provider: ^2.1.2
+
+  # ── Network ─────────────────────────────────────────────
+  http: ^1.2.0
+
+  # ── Audio ───────────────────────────────────────────────
+  audioplayers: ^6.0.0
+  record: ^6.0.0                    # Audio recording
+  permission_handler: ^11.3.0       # ✅ ADDED - Microphone permissions
+
+  # ── MIDI & Music ────────────────────────────────────────
+  dart_midi_pro: ^1.0.0
+
+  # ── UI & Display ────────────────────────────────────────
+  flutter_pdfview: ^1.3.2
+  image: ^4.1.3
+
+  # ── Firebase ────────────────────────────────────────────
+  firebase_core: ^2.24.2
+  firebase_auth: ^4.17.4
+  cloud_firestore: ^4.13.6
+  firebase_storage: ^11.6.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

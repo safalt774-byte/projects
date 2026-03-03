@@ -1,0 +1,22 @@
+[
+  {
+    "string": 2,
+    "fret": 3,
+    "time": 0.0
+  },
+  {
+    "string": 1,
+    "fret": 1,
+    "time": 1.0
+  },
+  {
+    "string": 0,
+    "fret": 0,
+    "time": 2.0
+  },
+  {
+    "string": 0,
+    "fret": 3,
+    "time": 3.0
+  }
+]
