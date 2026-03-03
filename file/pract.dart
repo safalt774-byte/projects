@@ -1,4 +1,4 @@
-import 'dart:io';
+/*import 'dart:io';
 import 'dart:typed_data';
 import 'dart:async';
 import 'dart:convert';
@@ -14,7 +14,6 @@ import '../models/note_feedback.dart';
 import '../services/api_service.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/pitch_detector.dart';
-import 'package:projects/services/app_feedback_service.dart';
 
 // ignore_for_file: use_build_context_synchronously
 
@@ -122,15 +121,6 @@ class _PracticePageState extends State<PracticePage>
 
   bool _wasPlayingBeforePause = false;
 
-  // ── Countdown ──────────────────────────────────────────────
-  bool _showCountdown  = false;
-  int  _countdownValue = 3;
-  Timer? _countdownTimer;
-
-  // ── Sound effects ──────────────────────────────────────────
-  final _sfx = AppFeedbackService.instance;
-  int _lastStreakMilestone = 0;
-
   // ── Convenience ────────────────────────────────────────────
   PageData get _activePage => _pages[_activePageIdx];
 
@@ -164,30 +154,6 @@ class _PracticePageState extends State<PracticePage>
   }
 
   // ══════════════════════════════════════════════════════════
-  //  COUNTDOWN
-  // ══════════════════════════════════════════════════════════
-
-  void _startCountdown(VoidCallback onComplete) {
-    _countdownTimer?.cancel();
-    setState(() { _showCountdown = true; _countdownValue = 3; });
-    _sfx.playCountdownBeep();
-
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) { timer.cancel(); return; }
-      final next = _countdownValue - 1;
-      if (next <= 0) {
-        timer.cancel();
-        _sfx.playCountdownBeep(isFinal: true);
-        setState(() { _showCountdown = false; });
-        onComplete();
-      } else {
-        _sfx.playCountdownBeep();
-        setState(() => _countdownValue = next);
-      }
-    });
-  }
-
-  // ══════════════════════════════════════════════════════════
   //  LIFECYCLE
   // ══════════════════════════════════════════════════════════
 
@@ -208,7 +174,6 @@ class _PracticePageState extends State<PracticePage>
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp, DeviceOrientation.portraitDown,
     ]);
-    _countdownTimer?.cancel();
     _posSub?.cancel();
     _completeSub?.cancel();
     _ticker.dispose();
@@ -253,9 +218,6 @@ class _PracticePageState extends State<PracticePage>
     _rebuildTimeline();
 
     if (mounted) setState(() => _audioLoading = false);
-
-    // Start countdown before auto-playing
-    _startCountdown(() => _play());
 
     if (widget.isMultiPage && widget.totalPages > 1) {
       _loadNextPage();
@@ -396,7 +358,6 @@ class _PracticePageState extends State<PracticePage>
     // If next page is ready → auto-advance
     if (nextIdx < _pages.length && _pages[nextIdx].audioReady) {
       debugPrint('🎵 Auto-advancing to page ${nextIdx + 1}');
-      _sfx.playWhoosh();
       _clock.stop();
       _autoAdvanceToPage(nextIdx);
       return;
@@ -412,7 +373,6 @@ class _PracticePageState extends State<PracticePage>
         _isPlaying = false;
         _finished  = true;
       });
-      _sfx.playCompletionFanfare();
     }
   }
 
@@ -588,7 +548,6 @@ class _PracticePageState extends State<PracticePage>
 
   Future<void> _play() async {
     if (_finished) { await _replayFromStart(); return; }
-    _sfx.playTick();
 
     setState(() { _mode = PracticeMode.watch; });
 
@@ -614,7 +573,6 @@ class _PracticePageState extends State<PracticePage>
   }
 
   Future<void> _pause() async {
-    _sfx.playTick();
     _clock.stop();
     if (_ticker.isActive) _ticker.stop();
     _audioPosMs = _songPosMs;
@@ -624,12 +582,10 @@ class _PracticePageState extends State<PracticePage>
   }
 
   Future<void> _replayFromStart() async {
-    _sfx.playWhoosh();
     await _jumpToPage(0);
   }
 
   Future<void> _setTempo(double rate) async {
-    AppFeedbackService.hapticTick();
     final c = rate.clamp(_tempoMin, _tempoMax);
     try { await _player?.setPlaybackRate(c); } catch (_) {}
     _clock.reset(); _clock.start();
@@ -707,7 +663,6 @@ class _PracticePageState extends State<PracticePage>
       _recorder = AudioRecorderService();
       if (!await _recorder!.init()) {
         if (mounted) {
-          _sfx.playError();
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Mic permission needed'), backgroundColor: Colors.orange),
           );
@@ -717,8 +672,6 @@ class _PracticePageState extends State<PracticePage>
       }
     }
     if (_isPlaying) await _pause();
-    _lastStreakMilestone = 0;
-    _sfx.playTick();
     setState(() {
       _mode = PracticeMode.practice;
       _currentNoteIndex = 0;
@@ -732,7 +685,6 @@ class _PracticePageState extends State<PracticePage>
   }
 
   Future<void> _stopPracticeMode() async {
-    _sfx.playTick();
     await _stopRecording();
     setState(() { _mode = PracticeMode.watch; _feedback = NoteFeedback.waiting(); _isPlaying = false; });
   }
@@ -760,18 +712,7 @@ class _PracticePageState extends State<PracticePage>
     setState(() => _feedback = fb);
 
     if (fb.shouldAdvance) {
-      if (fb.type == FeedbackType.perfect) {
-        _sfx.playPerfect();
-      } else {
-        _sfx.playSuccess();
-      }
       _correctCount++; _consecutiveCorrect++;
-      // Streak milestone sounds
-      if (_consecutiveCorrect >= 3 && _consecutiveCorrect > _lastStreakMilestone &&
-          (_consecutiveCorrect == 3 || _consecutiveCorrect == 5 || _consecutiveCorrect % 10 == 0)) {
-        _lastStreakMilestone = _consecutiveCorrect;
-        _sfx.playStreakChime();
-      }
       Future.delayed(const Duration(milliseconds: 300), () {
         if (!mounted || _mode != PracticeMode.practice) return;
         setState(() {
@@ -785,9 +726,7 @@ class _PracticePageState extends State<PracticePage>
         });
       });
     } else if (fb.shouldRetry) {
-      _sfx.playError();
       _consecutiveCorrect = 0;
-      _lastStreakMilestone = 0;
       if (_mistakeNoteIndex != _currentNoteIndex) _mistakeNoteIndex = _currentNoteIndex;
     }
   }
@@ -888,14 +827,6 @@ class _PracticePageState extends State<PracticePage>
         ]),
         if (_showCalibration)
           Positioned(right: 0, top: 0, bottom: 0, child: _buildCalibrationPanel()),
-
-        // ── Countdown overlay ────────────────────────────────
-        if (_showCountdown)
-          _buildCountdownOverlay(),
-
-        // ── Completion overlay ───────────────────────────────
-        if (_finished && _mode == PracticeMode.watch)
-          _buildCompletionOverlay(),
       ])),
     );
   }
@@ -1016,7 +947,7 @@ class _PracticePageState extends State<PracticePage>
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Row(children: [
         GestureDetector(
-          onTap: () { _sfx.playTick(); _pause(); Navigator.pop(context); },
+          onTap: () { _pause(); Navigator.pop(context); },
           child: const Icon(Icons.arrow_back_ios, color: Colors.white54, size: 18),
         ),
         const SizedBox(width: 12),
@@ -1261,153 +1192,4 @@ class _PracticePageState extends State<PracticePage>
       ]),
     );
   }
-
-  // ══════════════════════════════════════════════════════════
-  //  COUNTDOWN OVERLAY
-  // ══════════════════════════════════════════════════════════
-
-  Widget _buildCountdownOverlay() {
-    return Positioned.fill(
-      child: Container(
-        color: Colors.black.withAlpha(179),
-        child: Center(
-          child: TweenAnimationBuilder<double>(
-            key: ValueKey(_countdownValue),
-            tween: Tween(begin: 0.5, end: 1.0),
-            duration: const Duration(milliseconds: 400),
-            curve: Curves.elasticOut,
-            builder: (context, scale, child) {
-              return Transform.scale(
-                scale: scale,
-                child: TweenAnimationBuilder<double>(
-                  key: ValueKey(_countdownValue + 100),
-                  tween: Tween(begin: 0.0, end: 1.0),
-                  duration: const Duration(milliseconds: 200),
-                  builder: (context, opacity, child) {
-                    return Opacity(opacity: opacity, child: child);
-                  },
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        '$_countdownValue',
-                        style: TextStyle(
-                          color: _countdownValue == 1
-                              ? const Color(0xFF4CAF50)
-                              : Colors.white,
-                          fontSize: 96,
-                          fontWeight: FontWeight.bold,
-                          shadows: [
-                            Shadow(
-                              color: const Color(0xFF4CAF50).withAlpha(128),
-                              blurRadius: 30,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text('Get Ready...',
-                          style: TextStyle(color: Colors.white54, fontSize: 16)),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ══════════════════════════════════════════════════════════
-  //  COMPLETION OVERLAY
-  // ══════════════════════════════════════════════════════════
-
-  Widget _buildCompletionOverlay() {
-    return Positioned.fill(
-      child: GestureDetector(
-        onTap: () => setState(() => _finished = false),
-        child: Container(
-          color: Colors.black.withAlpha(191),
-          child: Center(
-            child: TweenAnimationBuilder<double>(
-              tween: Tween(begin: 0.8, end: 1.0),
-              duration: const Duration(milliseconds: 600),
-              curve: Curves.elasticOut,
-              builder: (context, scale, child) => Transform.scale(scale: scale, child: child),
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 40),
-                padding: const EdgeInsets.all(32),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF16213E),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: const Color(0xFF4CAF50).withAlpha(128), width: 2),
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFF4CAF50).withAlpha(51),
-                      blurRadius: 30, spreadRadius: 5,
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('🎉', style: TextStyle(fontSize: 48)),
-                    const SizedBox(height: 12),
-                    const Text('Song Complete!',
-                        style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 8),
-                    Text('${_allNotes.length} notes played',
-                        style: const TextStyle(color: Colors.white54, fontSize: 14)),
-                    if (widget.isMultiPage)
-                      Text('${widget.totalPages} pages',
-                          style: const TextStyle(color: Colors.white38, fontSize: 13)),
-                    const SizedBox(height: 20),
-                    Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      _buildCompletionButton(
-                        icon: Icons.replay,
-                        label: 'Replay',
-                        color: const Color(0xFF4CAF50),
-                        onTap: () { setState(() => _finished = false); _replayFromStart(); },
-                      ),
-                      const SizedBox(width: 16),
-                      _buildCompletionButton(
-                        icon: Icons.arrow_back,
-                        label: 'Back',
-                        color: const Color(0xFF37474F),
-                        onTap: () => Navigator.pop(context),
-                      ),
-                    ]),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCompletionButton({
-    required IconData icon,
-    required String label,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: () { _sfx.playTick(); onTap(); },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, color: Colors.white, size: 18),
-          const SizedBox(width: 8),
-          Text(label, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
-        ]),
-      ),
-    );
-  }
-}
+}*/

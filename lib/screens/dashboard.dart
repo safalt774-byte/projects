@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:projects/widgets/app_page_route.dart';
 import 'pdf_picker_page.dart';
 import 'login_page.dart';
 
@@ -19,7 +20,7 @@ class DashboardPage extends StatelessWidget {
 
               Navigator.pushAndRemoveUntil(
                 context,
-                MaterialPageRoute(builder: (_) => const LoginPage()),
+                AppPageRoute.fadeScale(page: const LoginPage()),
                     (route) => false,
               );
             },

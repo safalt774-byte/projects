@@ -1,7 +1,9 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_pdfview/flutter_pdfview.dart';
-import '../services/api_service.dart';
+import 'package:projects/services/api_service.dart';
+import 'package:projects/services/app_feedback_service.dart';
+import 'package:projects/widgets/app_page_route.dart';
 import 'practice_page.dart';
 
 class PdfViewPage extends StatefulWidget {
@@ -17,6 +19,7 @@ class _PdfViewPageState extends State<PdfViewPage> {
   String _statusMessage = '';
 
   Future<void> _processSheet() async {
+    AppFeedbackService.instance.playTick();
     setState(() { _processing = true; _statusMessage = 'Uploading...'; });
 
     try {
@@ -34,7 +37,7 @@ class _PdfViewPageState extends State<PdfViewPage> {
         return;
       }
 
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => PracticePage(
+      Navigator.pushReplacement(context, AppPageRoute.fadeScale(page: PracticePage(
         notes: result.notes,
         audioUrl: result.audioUrl,
         audioBase64: result.audioBase64,

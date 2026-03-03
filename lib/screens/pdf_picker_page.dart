@@ -1,5 +1,7 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:projects/services/app_feedback_service.dart';
+import 'package:projects/widgets/app_page_route.dart';
 import 'pdf_view_page.dart';
 
 /// Lets the user pick a PDF then navigates to PdfViewPage
@@ -15,12 +17,11 @@ class PdfPickerPage extends StatelessWidget {
 
     if (result == null || result.files.single.path == null) return;
     if (!context.mounted) return;
+    AppFeedbackService.instance.playTick();
 
     Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (_) => PdfViewPage(pdfPath: result.files.single.path!),
-      ),
+      AppPageRoute.slideLeft(page: PdfViewPage(pdfPath: result.files.single.path!)),
     );
   }
 
