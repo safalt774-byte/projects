@@ -273,8 +273,12 @@ class _PracticePageState extends State<PracticePage>
     final player = preloadedPlayer ?? AudioPlayer();
     _player = player;
 
+    // Completes on the first onPositionChanged event, confirming audio output.
+    final audioStarted = Completer<void>();
+
     _posSub = player.onPositionChanged.listen((pos) {
       if (!mounted) return;
+      if (!audioStarted.isCompleted) audioStarted.complete();
       final newPos = _activePageOffset + pos.inMilliseconds.toDouble();
       // Only sync forward — never let a late event snap the animation backward
       final effectivePos = _audioPosMs + _clock.elapsedMilliseconds * _playbackRate;
@@ -297,13 +301,17 @@ class _PracticePageState extends State<PracticePage>
       }
       await player.setPlaybackRate(_playbackRate);
       await player.resume();
-      // ── Start clock & ticker IMMEDIATELY after resume() ──────
-      // Don't wait for the first onPositionChanged event (can take 1-3s on
-      // Android). The stopwatch drives the animation from t=0 right away.
-      // When real position events arrive they will sync the clock forward.
+      // Wait for the first onPositionChanged event so the clock and ticker
+      // only start once audio is actually producing output (avoids the 2-4s
+      // window on Android where animation runs ahead of silent audio).
+      // Falls back after 3 s so the app never hangs indefinitely.
+      await audioStarted.future.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {},
+      );
       _clock.reset();
       _clock.start();
-      debugPrint('▶️ Page ${pg.pageNum} playing (clock started immediately)');
+      debugPrint('▶️ Page ${pg.pageNum} playing (clock started)');
       return true;
     } catch (e) {
       debugPrint('❌ _playPageAudio failed: $e');
@@ -435,8 +443,8 @@ class _PracticePageState extends State<PracticePage>
     final ok = await _playPageAudio(pageIdx, preloadedPlayer: preloaded);
 
     if (ok) {
-      // ── Un-freeze animation IMMEDIATELY — _playPageAudio already
-      //    started the clock inside resume(). Don't delay the ticker.
+      // _playPageAudio waited for the first onPositionChanged event, so
+      // clock is already running and audio is confirmed to be playing.
       setState(() {
         _jumpingToPage = false;
         _isPlaying     = true;
@@ -487,7 +495,7 @@ class _PracticePageState extends State<PracticePage>
     final ok = await _playPageAudio(pageIdx);
 
     if (ok) {
-      // clock already started inside _playPageAudio
+      // clock started inside _playPageAudio (after first position event)
       setState(() {
         _isPlaying     = true;
         _finished      = false;
@@ -588,7 +596,7 @@ class _PracticePageState extends State<PracticePage>
       _songPosMs = _activePageOffset; _audioPosMs = _activePageOffset;
       final ok = await _playPageAudio(_activePageIdx);
       if (ok) {
-        // clock already started inside _playPageAudio
+        // clock started inside _playPageAudio (after first position event)
         setState(() { _isPlaying = true; _jumpingToPage = false; });
         if (!_ticker.isActive) _ticker.start();
         // Begin buffering the next page while page 1 is playing.
