@@ -34,7 +34,7 @@ class PageData {
   });
 
   double get durationMs =>
-      notes.isEmpty ? 1 : notes.last.startMs + notes.last.durationMs + 500;
+      notes.isEmpty ? 1 : notes.last.startMs + notes.last.durationMs + 100;
 }
 
 class PracticePage extends StatefulWidget {
@@ -145,7 +145,7 @@ class _PracticePageState extends State<PracticePage>
       _activePageIdx < _pageOffsets.length ? _pageOffsets[_activePageIdx] : 0;
 
   double get _totalDurationMs =>
-      _allNotes.isEmpty ? 1 : _allNotes.last.startMs + _allNotes.last.durationMs + 500;
+      _allNotes.isEmpty ? 1 : _allNotes.last.startMs + _allNotes.last.durationMs + 100;
 
   /// Rebuild the combined note timeline from all loaded pages.
   void _rebuildTimeline() {
@@ -605,6 +605,8 @@ class _PracticePageState extends State<PracticePage>
   // ══════════════════════════════════════════════════════════
 
   /// Concatenate multiple WAV files (PCM, same sample rate) into one file.
+  /// Trims each WAV to match the actual note content duration to eliminate
+  /// gaps from trailing silence (reverb tails from FluidSynth).
   /// Returns the path to the combined file and per-page offsets in ms.
   Future<({String path, List<double> offsets})?> _concatenateWavFiles(List<String> wavPaths) async {
     try {
@@ -615,7 +617,6 @@ class _PracticePageState extends State<PracticePage>
       }
 
       // Parse WAV headers — find data chunks
-      // WAV format: RIFF header (44 bytes typically), then data
       final List<Uint8List> pcmChunks = [];
       final List<double> offsetsMs = [];
       int? sampleRate;
@@ -636,7 +637,7 @@ class _PracticePageState extends State<PracticePage>
         }
 
         // Find "fmt " and "data" chunks
-        int pos = 12; // skip RIFF header
+        int pos = 12;
         int fmtSampleRate = 44100;
         int fmtChannels = 1;
         int fmtBitsPerSample = 16;
@@ -654,7 +655,7 @@ class _PracticePageState extends State<PracticePage>
             dataChunk = bytes.sublist(pos + 8, pos + 8 + chunkSize);
           }
           pos += 8 + chunkSize;
-          if (chunkSize.isOdd) pos++; // padding byte
+          if (chunkSize.isOdd) pos++;
         }
 
         if (dataChunk == null) {
@@ -662,19 +663,39 @@ class _PracticePageState extends State<PracticePage>
           continue;
         }
 
-        // Use first file's format as reference
         sampleRate ??= fmtSampleRate;
         numChannels ??= fmtChannels;
         bitsPerSample ??= fmtBitsPerSample;
 
-        offsetsMs.add(currentOffsetMs);
         final bytesPerSample = fmtBitsPerSample ~/ 8;
-        final numSamples = dataChunk.length ~/ (fmtChannels * bytesPerSample);
-        final durationMs = (numSamples / fmtSampleRate) * 1000.0;
-        currentOffsetMs += durationMs;
-        pcmChunks.add(dataChunk);
+        final frameSize = fmtChannels * bytesPerSample;
 
-        debugPrint('📎 WAV $i: ${numSamples} samples, ${durationMs.round()}ms, offset=${offsetsMs.last.round()}ms');
+        // ── Trim: use note content duration + 300ms buffer ───────
+        // This eliminates the long trailing silence from FluidSynth
+        // that causes the "distant gap" between pages.
+        final isLastPage = (i == rawFiles.length - 1);
+        final pageDurationMs = (i < _pages.length) ? _pages[i].durationMs : double.infinity;
+        final fullWavDurationMs = (dataChunk.length ~/ frameSize) / fmtSampleRate * 1000.0;
+
+        double useDurationMs;
+        if (isLastPage) {
+          // Keep full duration for last page (include reverb tail)
+          useDurationMs = fullWavDurationMs;
+        } else {
+          // Trim to note content + 300ms, but never exceed actual WAV length
+          useDurationMs = (pageDurationMs - 200).clamp(0, fullWavDurationMs);
+        }
+
+        final useSamples = (useDurationMs / 1000.0 * fmtSampleRate).round();
+        final useBytes = (useSamples * frameSize).clamp(0, dataChunk.length);
+        final trimmedChunk = dataChunk.sublist(0, useBytes);
+
+        offsetsMs.add(currentOffsetMs);
+        final actualDurationMs = (useBytes ~/ frameSize) / fmtSampleRate * 1000.0;
+        currentOffsetMs += actualDurationMs;
+        pcmChunks.add(trimmedChunk);
+
+        debugPrint('📎 WAV $i: full=${fullWavDurationMs.round()}ms, trimmed=${actualDurationMs.round()}ms, offset=${offsetsMs.last.round()}ms');
       }
 
       if (pcmChunks.isEmpty || sampleRate == null) return null;
@@ -685,7 +706,6 @@ class _PracticePageState extends State<PracticePage>
       final byteRate = sampleRate * numChannels! * bytesPerSample;
       final blockAlign = numChannels * bytesPerSample;
 
-      // WAV header (44 bytes) + data
       final header = ByteData(44);
       // "RIFF"
       header.setUint8(0, 0x52); header.setUint8(1, 0x49);
@@ -697,8 +717,8 @@ class _PracticePageState extends State<PracticePage>
       // "fmt "
       header.setUint8(12, 0x66); header.setUint8(13, 0x6D);
       header.setUint8(14, 0x74); header.setUint8(15, 0x20);
-      header.setUint32(16, 16, Endian.little); // chunk size
-      header.setUint16(20, 1, Endian.little); // PCM format
+      header.setUint32(16, 16, Endian.little);
+      header.setUint16(20, 1, Endian.little);
       header.setUint16(22, numChannels, Endian.little);
       header.setUint32(24, sampleRate, Endian.little);
       header.setUint32(28, byteRate, Endian.little);
@@ -709,7 +729,6 @@ class _PracticePageState extends State<PracticePage>
       header.setUint8(38, 0x74); header.setUint8(39, 0x61);
       header.setUint32(40, totalDataSize, Endian.little);
 
-      // Write combined file
       final dir = await getTemporaryDirectory();
       final combinedPath = '${dir.path}/combined_${DateTime.now().millisecondsSinceEpoch}.wav';
       final sink = File(combinedPath).openWrite();
