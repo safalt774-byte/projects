@@ -699,42 +699,51 @@ class _PracticePageState extends State<PracticePage>
         Column(children: [
           _buildTopBar(),
 
-          if (widget.isMultiPage && _pagesLoaded < widget.totalPages)
-            _buildProcessingBar(),
+          Expanded(child: Stack(children: [
+            CustomPaint(
+              painter: FretboardHighwayPainter(
+                notes: _allNotes,
+                songPositionMs: _songPosMs,
+              ),
+              size: Size.infinite,
+            ),
 
-          if (_jumpingToPage)
-            Container(
-              width: double.infinity,
-              color: const Color(0xFF2196F3).withAlpha(30),
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                SizedBox(width: 12, height: 12,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
-                SizedBox(width: 8),
-                Text('Loading page audio…', style: TextStyle(color: Colors.white70, fontSize: 11)),
+            // Overlay status bars at top of the fretboard
+            Positioned(
+              top: 0, left: 0, right: 0,
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                if (widget.isMultiPage && _pagesLoaded < widget.totalPages)
+                  _buildProcessingBar(),
+
+                if (_jumpingToPage)
+                  Container(
+                    width: double.infinity,
+                    color: const Color(0xFF2196F3).withAlpha(180),
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      SizedBox(width: 12, height: 12,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+                      SizedBox(width: 8),
+                      Text('Loading page audio…', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                    ]),
+                  ),
+
+                if (_pages.isNotEmpty && !_activePage.audioReady)
+                  Container(
+                    width: double.infinity,
+                    color: Colors.orange.withAlpha(180),
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: const Text('⚠️ Audio unavailable — animation only',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.orange, fontSize: 11)),
+                  ),
               ]),
             ),
 
-          if (_pages.isNotEmpty && !_activePage.audioReady)
-            Container(
-              width: double.infinity,
-              color: Colors.orange.withAlpha(50),
-              padding: const EdgeInsets.symmetric(vertical: 3),
-              child: const Text('⚠️ Audio unavailable — animation only',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.orange, fontSize: 11)),
-            ),
-
-          Expanded(child: CustomPaint(
-            painter: FretboardHighwayPainter(
-              notes: _allNotes,
-              songPositionMs: _songPosMs,
-            ),
-            size: Size.infinite,
-          )),
-
-          // Page navigation bar (below fretboard)
-          if (widget.isMultiPage) _buildPageNavBar(),
+            // Overlay page nav bar at bottom of the fretboard
+            if (widget.isMultiPage)
+              Positioned(bottom: 0, left: 0, right: 0, child: _buildPageNavBar()),
+          ])),
 
           _buildFeedbackBar(),
           _buildControlsBar(),
