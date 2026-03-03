@@ -14,7 +14,6 @@ import '../models/note_feedback.dart';
 import '../services/api_service.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/pitch_detector.dart';
-import 'package:projects/services/app_feedback_service.dart';
 
 // ignore_for_file: use_build_context_synchronously
 
@@ -127,8 +126,7 @@ class _PracticePageState extends State<PracticePage>
   int  _countdownValue = 3;
   Timer? _countdownTimer;
 
-  // ── Sound effects ──────────────────────────────────────────
-  final _sfx = AppFeedbackService.instance;
+  // ── Streak tracking ────────────────────────────────────────
   int _lastStreakMilestone = 0;
 
   // ── Convenience ────────────────────────────────────────────
@@ -170,18 +168,15 @@ class _PracticePageState extends State<PracticePage>
   void _startCountdown(VoidCallback onComplete) {
     _countdownTimer?.cancel();
     setState(() { _showCountdown = true; _countdownValue = 3; });
-    _sfx.playCountdownBeep();
 
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) { timer.cancel(); return; }
       final next = _countdownValue - 1;
       if (next <= 0) {
         timer.cancel();
-        _sfx.playCountdownBeep(isFinal: true);
         setState(() { _showCountdown = false; });
         onComplete();
       } else {
-        _sfx.playCountdownBeep();
         setState(() => _countdownValue = next);
       }
     });
@@ -396,7 +391,6 @@ class _PracticePageState extends State<PracticePage>
     // If next page is ready → auto-advance
     if (nextIdx < _pages.length && _pages[nextIdx].audioReady) {
       debugPrint('🎵 Auto-advancing to page ${nextIdx + 1}');
-      _sfx.playWhoosh();
       _clock.stop();
       _autoAdvanceToPage(nextIdx);
       return;
@@ -412,7 +406,6 @@ class _PracticePageState extends State<PracticePage>
         _isPlaying = false;
         _finished  = true;
       });
-      _sfx.playCompletionFanfare();
     }
   }
 
@@ -588,7 +581,6 @@ class _PracticePageState extends State<PracticePage>
 
   Future<void> _play() async {
     if (_finished) { await _replayFromStart(); return; }
-    _sfx.playTick();
 
     setState(() { _mode = PracticeMode.watch; });
 
@@ -614,7 +606,6 @@ class _PracticePageState extends State<PracticePage>
   }
 
   Future<void> _pause() async {
-    _sfx.playTick();
     _clock.stop();
     if (_ticker.isActive) _ticker.stop();
     _audioPosMs = _songPosMs;
@@ -624,12 +615,10 @@ class _PracticePageState extends State<PracticePage>
   }
 
   Future<void> _replayFromStart() async {
-    _sfx.playWhoosh();
     await _jumpToPage(0);
   }
 
   Future<void> _setTempo(double rate) async {
-    AppFeedbackService.hapticTick();
     final c = rate.clamp(_tempoMin, _tempoMax);
     try { await _player?.setPlaybackRate(c); } catch (_) {}
     _clock.reset(); _clock.start();
@@ -707,7 +696,6 @@ class _PracticePageState extends State<PracticePage>
       _recorder = AudioRecorderService();
       if (!await _recorder!.init()) {
         if (mounted) {
-          _sfx.playError();
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Mic permission needed'), backgroundColor: Colors.orange),
           );
@@ -718,7 +706,6 @@ class _PracticePageState extends State<PracticePage>
     }
     if (_isPlaying) await _pause();
     _lastStreakMilestone = 0;
-    _sfx.playTick();
     setState(() {
       _mode = PracticeMode.practice;
       _currentNoteIndex = 0;
@@ -732,7 +719,6 @@ class _PracticePageState extends State<PracticePage>
   }
 
   Future<void> _stopPracticeMode() async {
-    _sfx.playTick();
     await _stopRecording();
     setState(() { _mode = PracticeMode.watch; _feedback = NoteFeedback.waiting(); _isPlaying = false; });
   }
@@ -760,17 +746,11 @@ class _PracticePageState extends State<PracticePage>
     setState(() => _feedback = fb);
 
     if (fb.shouldAdvance) {
-      if (fb.type == FeedbackType.perfect) {
-        _sfx.playPerfect();
-      } else {
-        _sfx.playSuccess();
-      }
       _correctCount++; _consecutiveCorrect++;
-      // Streak milestone sounds
+      // Streak milestone tracking
       if (_consecutiveCorrect >= 3 && _consecutiveCorrect > _lastStreakMilestone &&
           (_consecutiveCorrect == 3 || _consecutiveCorrect == 5 || _consecutiveCorrect % 10 == 0)) {
         _lastStreakMilestone = _consecutiveCorrect;
-        _sfx.playStreakChime();
       }
       Future.delayed(const Duration(milliseconds: 300), () {
         if (!mounted || _mode != PracticeMode.practice) return;
@@ -785,7 +765,6 @@ class _PracticePageState extends State<PracticePage>
         });
       });
     } else if (fb.shouldRetry) {
-      _sfx.playError();
       _consecutiveCorrect = 0;
       _lastStreakMilestone = 0;
       if (_mistakeNoteIndex != _currentNoteIndex) _mistakeNoteIndex = _currentNoteIndex;
@@ -1016,7 +995,7 @@ class _PracticePageState extends State<PracticePage>
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Row(children: [
         GestureDetector(
-          onTap: () { _sfx.playTick(); _pause(); Navigator.pop(context); },
+          onTap: () { _pause(); Navigator.pop(context); },
           child: const Icon(Icons.arrow_back_ios, color: Colors.white54, size: 18),
         ),
         const SizedBox(width: 12),
@@ -1395,7 +1374,7 @@ class _PracticePageState extends State<PracticePage>
     required VoidCallback onTap,
   }) {
     return GestureDetector(
-      onTap: () { _sfx.playTick(); onTap(); },
+      onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
         decoration: BoxDecoration(
