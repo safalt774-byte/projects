@@ -292,12 +292,21 @@ class _PracticePageState extends State<PracticePage>
 
     final nextIdx = _activePageIdx + 1;
 
-    // If next page is ready → auto-advance (freeze animation meanwhile)
+    // ★ FIX 1: Snap _songPosMs to the exact boundary of the next page
+    if (nextIdx < _pageOffsets.length) {
+      _songPosMs = _pageOffsets[nextIdx];
+    } else if (nextIdx < _pages.length) {
+      double offset = 0;
+      for (int i = 0; i < nextIdx && i < _pages.length; i++) {
+        offset += _pages[i].durationMs;
+      }
+      _songPosMs = offset;
+    }
+
+    // If next page is ready → auto-advance
     if (nextIdx < _pages.length && _pages[nextIdx].audioReady) {
       debugPrint('🎵 Auto-advancing to page ${nextIdx + 1}');
       _clock.stop();
-      // Keep _isPlaying = true, keep _ticker running but _jumpingToPage
-      // will block _onTick from advancing.
       _autoAdvanceToPage(nextIdx);
       return;
     }
@@ -320,18 +329,27 @@ class _PracticePageState extends State<PracticePage>
     if (_jumpingToPage) return;
     setState(() { _jumpingToPage = true; });
 
-    // Don't stop the ticker — _jumpingToPage blocks _onTick.
-    // Hold _songPosMs at current position so fretboard doesn't jump.
+    // ★ FIX 2: Stop the ticker entirely during swap to prevent
+    //   _onTick from running with stale clock data once _jumpingToPage is cleared.
+    _clock.stop();
+    if (_ticker.isActive) _ticker.stop();
+
     await _disposePlayer();
 
     _activePageIdx = pageIdx;
-    _audioPosMs = _activePageOffset; // global start of new page
+    final pageStart = _activePageOffset;
+
+    // ★ FIX 3: Force _songPosMs to the exact start of the new page.
+    _songPosMs  = pageStart;
+    _audioPosMs = pageStart;
     _clock.reset();
 
     final ok = await _playPageAudio(pageIdx);
 
     if (ok) {
-      _audioPosMs = _activePageOffset;
+      // ★ FIX 4: Re-sync positions *after* audio confirms playing.
+      _songPosMs  = pageStart;
+      _audioPosMs = pageStart;
       _clock.reset();
       _clock.start();
       setState(() {
@@ -339,6 +357,7 @@ class _PracticePageState extends State<PracticePage>
         _isPlaying     = true;
         _finished      = false;
       });
+      // Restart the ticker *after* all state is consistent.
       if (!_ticker.isActive) _ticker.start();
     } else {
       // Audio failed — stop
