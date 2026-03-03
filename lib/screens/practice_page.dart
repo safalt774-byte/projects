@@ -268,15 +268,29 @@ class _PracticePageState extends State<PracticePage>
 
     debugPrint('🔧 _playPageAudio page=${pg.pageNum} (preloaded=${preloadedPlayer != null})');
 
-    await _disposePlayer();
+    // Cancel listeners on old player but do NOT stop/dispose yet —
+    // that blocks for seconds on Android.  Just orphan it.
+    _posSub?.cancel();
+    _completeSub?.cancel();
+    _posSub = null;
+    _completeSub = null;
+    final oldPlayer = _player;
+    _player = null;
+
+    // Orphan-dispose old player in background (fire-and-forget)
+    if (oldPlayer != null) {
+      Future.microtask(() async {
+        try { await oldPlayer.stop(); } catch (_) {}
+        try { oldPlayer.dispose(); } catch (_) {}
+      });
+    }
 
     final player = preloadedPlayer ?? AudioPlayer();
     _player = player;
 
     _posSub = player.onPositionChanged.listen((pos) {
-      if (!mounted) return;
+      if (!mounted || _player != player) return;
       final newPos = _activePageOffset + pos.inMilliseconds.toDouble();
-      // Only sync forward — never let a late event snap the animation backward
       final effectivePos = _audioPosMs + _clock.elapsedMilliseconds * _playbackRate;
       if (newPos >= effectivePos) {
         _audioPosMs = newPos;
@@ -286,7 +300,7 @@ class _PracticePageState extends State<PracticePage>
     });
 
     _completeSub = player.onPlayerComplete.listen((_) {
-      if (!mounted) return;
+      if (!mounted || _player != player) return;
       debugPrint('🏁 Page ${pg.pageNum} audio complete');
       _onPageAudioComplete();
     });
@@ -297,13 +311,13 @@ class _PracticePageState extends State<PracticePage>
       }
       await player.setPlaybackRate(_playbackRate);
       await player.resume();
-      // ── Start clock & ticker IMMEDIATELY after resume() ──────
-      // Don't wait for the first onPositionChanged event (can take 1-3s on
-      // Android). The stopwatch drives the animation from t=0 right away.
-      // When real position events arrive they will sync the clock forward.
+
+      // Start clock IMMEDIATELY — do NOT wait for onPositionChanged.
+      // The clock drives the animation right away; when position events
+      // arrive they will sync the clock forward.
       _clock.reset();
       _clock.start();
-      debugPrint('▶️ Page ${pg.pageNum} playing (clock started immediately)');
+      debugPrint('▶️ Page ${pg.pageNum} audio resume() returned, clock started');
       return true;
     } catch (e) {
       debugPrint('❌ _playPageAudio failed: $e');
@@ -348,20 +362,19 @@ class _PracticePageState extends State<PracticePage>
     }
   }
 
-  Future<void> _disposePlayer() async {
+  void _disposePlayerSync() {
     _posSub?.cancel();
     _completeSub?.cancel();
     _posSub = null;
     _completeSub = null;
-    // Fire-and-forget: do NOT await stop/dispose.
-    // On Android, await _player?.stop() can block for 3-4 seconds which
-    // causes the animation to run without audio during page transitions.
     final old = _player;
     _player = null;
-    Future.microtask(() async {
-      try { await old?.stop(); } catch (_) {}
-      try { old?.dispose(); } catch (_) {}
-    });
+    if (old != null) {
+      Future.microtask(() async {
+        try { await old.stop(); } catch (_) {}
+        try { old.dispose(); } catch (_) {}
+      });
+    }
   }
 
   // ══════════════════════════════════════════════════════════
@@ -370,26 +383,12 @@ class _PracticePageState extends State<PracticePage>
 
   void _onPageAudioComplete() {
     if (_mode != PracticeMode.watch) return;
-    if (_jumpingToPage) return;
 
     final nextIdx = _activePageIdx + 1;
 
-    // ★ FIX 1: Snap _songPosMs to the exact boundary of the next page
-    if (nextIdx < _pageOffsets.length) {
-      _songPosMs = _pageOffsets[nextIdx];
-    } else if (nextIdx < _pages.length) {
-      double offset = 0;
-      for (int i = 0; i < nextIdx && i < _pages.length; i++) {
-        offset += _pages[i].durationMs;
-      }
-      _songPosMs = offset;
-    }
-
-    // If next page is ready → auto-advance
+    // If next page is ready → auto-advance seamlessly (no ticker stop)
     if (nextIdx < _pages.length && _pages[nextIdx].audioReady) {
       debugPrint('🎵 Auto-advancing to page ${nextIdx + 1}');
-      _clock.stop();
-      if (_ticker.isActive) _ticker.stop();
       _autoAdvanceToPage(nextIdx);
       return;
     }
@@ -397,7 +396,19 @@ class _PracticePageState extends State<PracticePage>
     // No next page ready → song is done (or still processing)
     _clock.stop();
     if (_ticker.isActive) _ticker.stop();
-    _disposePlayer();
+    // Orphan-dispose player in background
+    _posSub?.cancel();
+    _completeSub?.cancel();
+    _posSub = null;
+    _completeSub = null;
+    final old = _player;
+    _player = null;
+    if (old != null) {
+      Future.microtask(() async {
+        try { await old.stop(); } catch (_) {}
+        try { old.dispose(); } catch (_) {}
+      });
+    }
 
     if (mounted) {
       setState(() {
@@ -410,10 +421,6 @@ class _PracticePageState extends State<PracticePage>
   /// Auto-advance: swap audio and restart animation immediately.
   Future<void> _autoAdvanceToPage(int pageIdx) async {
     if (_jumpingToPage) return;
-    setState(() { _jumpingToPage = true; });
-
-    _clock.stop();
-    if (_ticker.isActive) _ticker.stop();
 
     // Pull the pre-loaded player if it's ready for this exact page.
     AudioPlayer? preloaded;
@@ -423,8 +430,6 @@ class _PracticePageState extends State<PracticePage>
       _preloadedPageIdx = -1;
     }
 
-    await _disposePlayer();
-
     _activePageIdx = pageIdx;
     final pageStart = _activePageOffset;
 
@@ -432,23 +437,21 @@ class _PracticePageState extends State<PracticePage>
     _audioPosMs = pageStart;
     _clock.reset();
 
+    // _playPageAudio orphans the old player (fire-and-forget) and starts new
+    // audio + clock immediately — no blocking.
     final ok = await _playPageAudio(pageIdx, preloadedPlayer: preloaded);
 
     if (ok) {
-      // ── Un-freeze animation IMMEDIATELY — _playPageAudio already
-      //    started the clock inside resume(). Don't delay the ticker.
       setState(() {
-        _jumpingToPage = false;
         _isPlaying     = true;
         _finished      = false;
       });
       if (!_ticker.isActive) _ticker.start();
-      // Begin buffering the page after this one while this one plays.
       _preloadAudio(pageIdx + 1);
     } else {
+      _clock.stop();
       if (_ticker.isActive) _ticker.stop();
       setState(() {
-        _jumpingToPage = false;
         _isPlaying     = false;
         _finished      = true;
       });
@@ -475,7 +478,7 @@ class _PracticePageState extends State<PracticePage>
     _preloadedPageIdx = -1;
     _preloadingForIdx = -1;
 
-    await _disposePlayer();
+    _disposePlayerSync();
 
     _activePageIdx = pageIdx;
     final globalStart = _activePageOffset;
@@ -487,7 +490,7 @@ class _PracticePageState extends State<PracticePage>
     final ok = await _playPageAudio(pageIdx);
 
     if (ok) {
-      // clock already started inside _playPageAudio
+      // clock started inside _playPageAudio (after first position event)
       setState(() {
         _isPlaying     = true;
         _finished      = false;
@@ -588,7 +591,7 @@ class _PracticePageState extends State<PracticePage>
       _songPosMs = _activePageOffset; _audioPosMs = _activePageOffset;
       final ok = await _playPageAudio(_activePageIdx);
       if (ok) {
-        // clock already started inside _playPageAudio
+        // clock started inside _playPageAudio (after first position event)
         setState(() { _isPlaying = true; _jumpingToPage = false; });
         if (!_ticker.isActive) _ticker.start();
         // Begin buffering the next page while page 1 is playing.
@@ -823,39 +826,45 @@ class _PracticePageState extends State<PracticePage>
         Column(children: [
           _buildTopBar(),
 
-          if (widget.isMultiPage && _pagesLoaded < widget.totalPages)
-            _buildProcessingBar(),
+          Expanded(child: Stack(children: [
+            Positioned.fill(child: CustomPaint(
+              painter: FretboardHighwayPainter(
+                notes: _allNotes,
+                songPositionMs: _songPosMs,
+              ),
+              size: Size.infinite,
+            )),
 
-          if (_jumpingToPage)
-            Container(
-              width: double.infinity,
-              color: const Color(0xFF2196F3).withAlpha(30),
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                SizedBox(width: 12, height: 12,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
-                SizedBox(width: 8),
-                Text('Loading page audio…', style: TextStyle(color: Colors.white70, fontSize: 11)),
-              ]),
-            ),
-
-          if (_pages.isNotEmpty && !_activePage.audioReady)
-            Container(
-              width: double.infinity,
-              color: Colors.orange.withAlpha(50),
-              padding: const EdgeInsets.symmetric(vertical: 3),
-              child: const Text('⚠️ Audio unavailable — animation only',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.orange, fontSize: 11)),
-            ),
-
-          Expanded(child: CustomPaint(
-            painter: FretboardHighwayPainter(
-              notes: _allNotes,
-              songPositionMs: _songPosMs,
-            ),
-            size: Size.infinite,
-          )),
+            if (widget.isMultiPage && _pagesLoaded < widget.totalPages ||
+                _jumpingToPage ||
+                (_pages.isNotEmpty && !_activePage.audioReady))
+              Positioned(top: 0, left: 0, right: 0,
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    if (widget.isMultiPage && _pagesLoaded < widget.totalPages)
+                      _buildProcessingBar(),
+                    if (_jumpingToPage)
+                      Container(
+                        width: double.infinity,
+                        color: const Color(0xFF2196F3).withAlpha(30),
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: const Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                          SizedBox(width: 12, height: 12,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+                          SizedBox(width: 8),
+                          Text('Loading page audio…', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                        ]),
+                      ),
+                    if (_pages.isNotEmpty && !_activePage.audioReady)
+                      Container(
+                        width: double.infinity,
+                        color: Colors.orange.withAlpha(50),
+                        padding: const EdgeInsets.symmetric(vertical: 3),
+                        child: const Text('⚠️ Audio unavailable — animation only',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.orange, fontSize: 11)),
+                      ),
+                  ])),
+          ])),
 
           // Page navigation bar (below fretboard)
           if (widget.isMultiPage) _buildPageNavBar(),
@@ -934,8 +943,8 @@ class _PracticePageState extends State<PracticePage>
           color: isActive
               ? const Color(0xFF4CAF50)
               : isReady
-                  ? const Color(0xFF4CAF50).withAlpha(40)
-                  : Colors.white10,
+              ? const Color(0xFF4CAF50).withAlpha(40)
+              : Colors.white10,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
             color: isActive
@@ -1001,7 +1010,7 @@ class _PracticePageState extends State<PracticePage>
           Text(_noteLabel, style: const TextStyle(color: Color(0xFF4CAF50), fontSize: 15, fontWeight: FontWeight.bold)),
           Text(
             'Note ${_currentNoteIndex + 1}/${_allNotes.length}'
-            '${widget.isMultiPage ? ' • Page ${_activePageIdx + 1}/${widget.totalPages}' : ''}',
+                '${widget.isMultiPage ? ' • Page ${_activePageIdx + 1}/${widget.totalPages}' : ''}',
             style: const TextStyle(color: Colors.white38, fontSize: 11),
           ),
         ])),
@@ -1148,7 +1157,7 @@ class _PracticePageState extends State<PracticePage>
             onPressed: _jumpingToPage ? null : (_isPlaying ? _pause : _play),
             child: _jumpingToPage
                 ? const SizedBox(width: 20, height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                 : Icon(_isPlaying ? Icons.pause : Icons.play_arrow, color: Colors.white, size: 24),
           )),
           const SizedBox(width: 8),
@@ -1168,10 +1177,10 @@ class _PracticePageState extends State<PracticePage>
             ),
             onPressed: _currentNoteIndex > 0
                 ? () => setState(() {
-                    _currentNoteIndex--;
-                    _songPosMs = _currentNote!.startMs;
-                    _feedback = NoteFeedback.listening();
-                  })
+              _currentNoteIndex--;
+              _songPosMs = _currentNote!.startMs;
+              _feedback = NoteFeedback.listening();
+            })
                 : null,
             child: const Icon(Icons.skip_previous, color: Colors.white, size: 18),
           )),
@@ -1182,10 +1191,10 @@ class _PracticePageState extends State<PracticePage>
             ),
             onPressed: _currentNoteIndex < _allNotes.length - 1
                 ? () => setState(() {
-                    _currentNoteIndex++;
-                    _songPosMs = _currentNote!.startMs;
-                    _feedback = NoteFeedback.listening();
-                  })
+              _currentNoteIndex++;
+              _songPosMs = _currentNote!.startMs;
+              _feedback = NoteFeedback.listening();
+            })
                 : null,
             child: const Icon(Icons.skip_next, color: Colors.white, size: 18),
           )),
