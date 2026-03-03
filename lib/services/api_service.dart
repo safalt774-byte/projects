@@ -40,7 +40,7 @@ class PageResult {
 
 class ApiService {
   static const String _defaultUrl =
-      'https://sensors-bringing-eye-tsunami.trycloudflare.com';
+      'https://chan-ids-supplements-defendant.trycloudflare.com ';
 
   static String _baseUrl = _defaultUrl;
   static const String _prefKey = 'server_base_url';

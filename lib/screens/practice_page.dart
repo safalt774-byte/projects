@@ -253,14 +253,17 @@ class _PracticePageState extends State<PracticePage>
     _pages.add(page1);
     _rebuildTimeline();
 
-    if (mounted) setState(() => _audioLoading = false);
-
-    // Start countdown before auto-playing
-    _startCountdown(() => _play());
-
-    if (widget.isMultiPage && widget.totalPages > 1) {
-      _loadNextPage();
+    // For single-page, just play directly
+    if (!widget.isMultiPage || widget.totalPages <= 1) {
+      if (mounted) setState(() => _audioLoading = false);
+      _startCountdown(() => _play());
+      return;
     }
+
+    // For multi-page: start playing page 1, begin background loading of page 2+
+    if (mounted) setState(() => _audioLoading = false);
+    _startCountdown(() => _play());
+    _loadNextPage();
   }
 
   // ══════════════════════════════════════════════════════════
@@ -574,11 +577,13 @@ class _PracticePageState extends State<PracticePage>
         _preloadAudio(_pages.length - 1);
       }
 
+      // Concatenate ALL available WAV files on-device right now.
+      // This runs in parallel with playback so by the time page 1 finishes,
+      // the combined file is already ready.
+      _buildCombinedAudioLocally();
+
       if (_nextPageToLoad <= widget.totalPages && mounted) {
         _loadNextPage();
-      } else if (mounted && !_hasCombinedAudio && !_combiningAudio) {
-        // All pages loaded → combine audio into one file
-        _fetchCombinedAudio();
       }
     } catch (e) {
       debugPrint('⚠️ Page $pageNum failed: $e');
@@ -599,36 +604,208 @@ class _PracticePageState extends State<PracticePage>
   //  COMBINED AUDIO (single player for all pages)
   // ══════════════════════════════════════════════════════════
 
-  Future<void> _fetchCombinedAudio() async {
-    if (_combiningAudio || _hasCombinedAudio) return;
-    _combiningAudio = true;
-    debugPrint('🔗 Requesting combined audio from backend...');
-
+  /// Concatenate multiple WAV files (PCM, same sample rate) into one file.
+  /// Returns the path to the combined file and per-page offsets in ms.
+  Future<({String path, List<double> offsets})?> _concatenateWavFiles(List<String> wavPaths) async {
     try {
-      final result = await ApiService.combineAudio(widget.jobId);
-      if (!mounted) return;
-
-      String? path;
-      if (result.audioBase64 != null && result.audioBase64!.isNotEmpty) {
-        path = await _saveBase64(result.audioBase64!);
+      // Read all WAV files
+      final List<Uint8List> rawFiles = [];
+      for (final p in wavPaths) {
+        rawFiles.add(await File(p).readAsBytes());
       }
-      path ??= await _downloadWav(result.audioUrl);
 
-      if (path != null && mounted) {
-        _combinedAudioPath = path;
-        _combinedPageOffsets = result.pageOffsetsMs;
-        _hasCombinedAudio = true;
-        _combiningAudio = false;
-        debugPrint('✅ Combined audio ready: ${result.pageOffsetsMs.length} pages, path=$path');
+      // Parse WAV headers — find data chunks
+      // WAV format: RIFF header (44 bytes typically), then data
+      final List<Uint8List> pcmChunks = [];
+      final List<double> offsetsMs = [];
+      int? sampleRate;
+      int? numChannels;
+      int? bitsPerSample;
+      double currentOffsetMs = 0;
 
-        // If we're currently between pages or the song finished waiting,
-        // switch immediately.
-        if (_finished || !_isPlaying) {
-          // Don't auto-switch mid-playback; wait for page complete
+      for (int i = 0; i < rawFiles.length; i++) {
+        final bytes = rawFiles[i];
+        if (bytes.length < 44) continue;
+        final bd = ByteData.sublistView(bytes);
+
+        // Verify RIFF header
+        final riff = String.fromCharCodes(bytes.sublist(0, 4));
+        if (riff != 'RIFF') {
+          debugPrint('⚠️ WAV $i: not RIFF');
+          continue;
         }
+
+        // Find "fmt " and "data" chunks
+        int pos = 12; // skip RIFF header
+        int fmtSampleRate = 44100;
+        int fmtChannels = 1;
+        int fmtBitsPerSample = 16;
+        Uint8List? dataChunk;
+
+        while (pos < bytes.length - 8) {
+          final chunkId = String.fromCharCodes(bytes.sublist(pos, pos + 4));
+          final chunkSize = bd.getUint32(pos + 4, Endian.little);
+
+          if (chunkId == 'fmt ') {
+            fmtChannels = bd.getUint16(pos + 10, Endian.little);
+            fmtSampleRate = bd.getUint32(pos + 12, Endian.little);
+            fmtBitsPerSample = bd.getUint16(pos + 22, Endian.little);
+          } else if (chunkId == 'data') {
+            dataChunk = bytes.sublist(pos + 8, pos + 8 + chunkSize);
+          }
+          pos += 8 + chunkSize;
+          if (chunkSize.isOdd) pos++; // padding byte
+        }
+
+        if (dataChunk == null) {
+          debugPrint('⚠️ WAV $i: no data chunk');
+          continue;
+        }
+
+        // Use first file's format as reference
+        sampleRate ??= fmtSampleRate;
+        numChannels ??= fmtChannels;
+        bitsPerSample ??= fmtBitsPerSample;
+
+        offsetsMs.add(currentOffsetMs);
+        final bytesPerSample = fmtBitsPerSample ~/ 8;
+        final numSamples = dataChunk.length ~/ (fmtChannels * bytesPerSample);
+        final durationMs = (numSamples / fmtSampleRate) * 1000.0;
+        currentOffsetMs += durationMs;
+        pcmChunks.add(dataChunk);
+
+        debugPrint('📎 WAV $i: ${numSamples} samples, ${durationMs.round()}ms, offset=${offsetsMs.last.round()}ms');
       }
+
+      if (pcmChunks.isEmpty || sampleRate == null) return null;
+
+      // Build combined WAV
+      final totalDataSize = pcmChunks.fold<int>(0, (sum, c) => sum + c.length);
+      final bytesPerSample = bitsPerSample! ~/ 8;
+      final byteRate = sampleRate * numChannels! * bytesPerSample;
+      final blockAlign = numChannels * bytesPerSample;
+
+      // WAV header (44 bytes) + data
+      final header = ByteData(44);
+      // "RIFF"
+      header.setUint8(0, 0x52); header.setUint8(1, 0x49);
+      header.setUint8(2, 0x46); header.setUint8(3, 0x46);
+      header.setUint32(4, 36 + totalDataSize, Endian.little);
+      // "WAVE"
+      header.setUint8(8, 0x57); header.setUint8(9, 0x41);
+      header.setUint8(10, 0x56); header.setUint8(11, 0x45);
+      // "fmt "
+      header.setUint8(12, 0x66); header.setUint8(13, 0x6D);
+      header.setUint8(14, 0x74); header.setUint8(15, 0x20);
+      header.setUint32(16, 16, Endian.little); // chunk size
+      header.setUint16(20, 1, Endian.little); // PCM format
+      header.setUint16(22, numChannels, Endian.little);
+      header.setUint32(24, sampleRate, Endian.little);
+      header.setUint32(28, byteRate, Endian.little);
+      header.setUint16(32, blockAlign, Endian.little);
+      header.setUint16(34, bitsPerSample, Endian.little);
+      // "data"
+      header.setUint8(36, 0x64); header.setUint8(37, 0x61);
+      header.setUint8(38, 0x74); header.setUint8(39, 0x61);
+      header.setUint32(40, totalDataSize, Endian.little);
+
+      // Write combined file
+      final dir = await getTemporaryDirectory();
+      final combinedPath = '${dir.path}/combined_${DateTime.now().millisecondsSinceEpoch}.wav';
+      final sink = File(combinedPath).openWrite();
+      sink.add(header.buffer.asUint8List());
+      for (final chunk in pcmChunks) {
+        sink.add(chunk);
+      }
+      await sink.flush();
+      await sink.close();
+
+      debugPrint('✅ Combined WAV: $combinedPath (${(totalDataSize / 1024).round()} KB, ${currentOffsetMs.round()}ms total)');
+      return (path: combinedPath, offsets: offsetsMs);
     } catch (e) {
-      debugPrint('⚠️ Combined audio failed: $e');
+      debugPrint('❌ WAV concatenation failed: $e');
+      return null;
+    }
+  }
+
+  /// Hot-swap the current per-page player to the combined audio file,
+  /// seeking to the current playback position. No audible gap because
+  /// we seek to the exact ms position.
+  Future<void> _hotSwapToCombined() async {
+    if (!_hasCombinedAudio || _combinedAudioPath == null) return;
+    if (_player == null) return;
+
+    final currentPos = _songPosMs;
+    debugPrint('🔀 Hot-swapping to combined audio at ${currentPos.round()}ms');
+
+    // Pause current playback
+    _clock.stop();
+    if (_ticker.isActive) _ticker.stop();
+    _posSub?.cancel();
+    _completeSub?.cancel();
+    _posSub = null;
+    _completeSub = null;
+    final old = _player;
+    _player = null;
+    if (old != null) {
+      Future.microtask(() async {
+        try { await old.stop(); } catch (_) {}
+        try { old.dispose(); } catch (_) {}
+      });
+    }
+
+    // Dispose preloaded — no longer needed
+    try { _preloadedPlayer?.dispose(); } catch (_) {}
+    _preloadedPlayer = null;
+    _preloadedPageIdx = -1;
+
+    await _switchToCombinedAudio(seekToMs: currentPos);
+  }
+
+  /// Concatenate all currently-available page WAVs into one combined file.
+  /// Called every time a new page finishes loading.
+  Future<void> _buildCombinedAudioLocally() async {
+    if (_combiningAudio) return;
+
+    // Need at least 2 pages with audio to combine
+    final wavPaths = _pages
+        .where((p) => p.audioReady && p.audioPath != null)
+        .map((p) => p.audioPath!)
+        .toList();
+    if (wavPaths.length < 2) return;
+
+    _combiningAudio = true;
+    debugPrint('🔗 Concatenating ${wavPaths.length} WAV files locally...');
+
+    final result = await _concatenateWavFiles(wavPaths);
+    if (!mounted) { _combiningAudio = false; return; }
+
+    if (result != null) {
+      // Delete old combined file if any
+      if (_combinedAudioPath != null) {
+        File(_combinedAudioPath!).delete().catchError((_) => File(_combinedAudioPath!));
+      }
+
+      _combinedAudioPath = result.path;
+      _combinedPageOffsets = result.offsets;
+      _hasCombinedAudio = true;
+      _combiningAudio = false;
+
+      debugPrint('✅ Combined audio ready locally: ${result.offsets.length} pages');
+
+      // If currently playing, hot-swap to combined audio now so there's
+      // zero gap when the current page ends.
+      if (_isPlaying && mounted) {
+        _hotSwapToCombined();
+      }
+      // If page 1 already finished and we're stuck, switch now
+      else if (_finished && mounted) {
+        final nextOffset = _activePageIdx + 1 < _combinedPageOffsets.length
+            ? _combinedPageOffsets[_activePageIdx + 1]
+            : 0.0;
+        _switchToCombinedAudio(seekToMs: nextOffset);
+      }
+    } else {
       _combiningAudio = false;
     }
   }
