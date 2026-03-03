@@ -83,6 +83,11 @@ class _PracticePageState extends State<PracticePage>
   StreamSubscription? _posSub;
   StreamSubscription? _completeSub;
 
+  // ── Pre-loaded next-page player ────────────────────────────
+  AudioPlayer? _preloadedPlayer;
+  int          _preloadedPageIdx   = -1;  // idx of the ready pre-loaded player
+  int          _preloadingForIdx   = -1;  // idx currently being async-loaded
+
   bool _audioLoading  = true;
   bool _isPlaying     = false;
   bool _finished      = false;       // entire song finished (last page done)
@@ -173,6 +178,8 @@ class _PracticePageState extends State<PracticePage>
     _completeSub?.cancel();
     _ticker.dispose();
     _player?.dispose();
+    try { _preloadedPlayer?.dispose(); } catch (e) { debugPrint('⚠️ preloadedPlayer dispose: $e'); }
+    _preloadedPlayer = null;
     _recorder?.dispose();
     for (final pg in _pages) {
       if (pg.audioPath != null) {
@@ -221,27 +228,28 @@ class _PracticePageState extends State<PracticePage>
   //  PLAYER
   // ══════════════════════════════════════════════════════════
 
-  Future<bool> _playPageAudio(int pageIdx) async {
+  Future<bool> _playPageAudio(int pageIdx, {AudioPlayer? preloadedPlayer}) async {
     if (pageIdx >= _pages.length) return false;
     final pg = _pages[pageIdx];
     if (pg.audioPath == null || !pg.audioReady) return false;
 
-    debugPrint('🔧 _playPageAudio page=${pg.pageNum}');
+    debugPrint('🔧 _playPageAudio page=${pg.pageNum} (preloaded=${preloadedPlayer != null})');
 
     await _disposePlayer();
 
-    final player = AudioPlayer();
+    final player = preloadedPlayer ?? AudioPlayer();
     _player = player;
 
     final firstPos = Completer<void>();
 
     _posSub = player.onPositionChanged.listen((pos) {
       if (!mounted) return;
-      // Only move _audioPosMs forward — ignore duplicate pos=0 events that
-      // the audio player emits when it actually starts decoding, which would
-      // otherwise reset the clock backward and cause the visible replay.
       final newPos = _activePageOffset + pos.inMilliseconds.toDouble();
-      if (newPos > _audioPosMs) {
+      // Compare against the *effective* position (anchor + interpolated clock)
+      // so that late-arriving or duplicate pos events can never snap the
+      // animation backward and cause the visible "replay".
+      final effectivePos = _audioPosMs + _clock.elapsedMilliseconds * _playbackRate;
+      if (newPos >= effectivePos) {
         _audioPosMs = newPos;
         _clock.reset();
         _clock.start();
@@ -259,7 +267,9 @@ class _PracticePageState extends State<PracticePage>
     });
 
     try {
-      await player.setSource(DeviceFileSource(pg.audioPath!));
+      if (preloadedPlayer == null) {
+        await player.setSource(DeviceFileSource(pg.audioPath!));
+      }
       await player.setPlaybackRate(_playbackRate);
       await player.resume();
 
@@ -274,6 +284,43 @@ class _PracticePageState extends State<PracticePage>
       debugPrint('❌ _playPageAudio failed: $e');
       if (!firstPos.isCompleted) firstPos.complete();
       return false;
+    }
+  }
+
+  /// Pre-load the audio source for [pageIdx] into a standby [AudioPlayer] so
+  /// that the page transition can resume playback immediately (no buffering gap).
+  Future<void> _preloadAudio(int pageIdx) async {
+    if (pageIdx >= _pages.length) return;
+    if (_preloadedPageIdx == pageIdx) return;   // already ready
+    if (_preloadingForIdx  == pageIdx) return;  // already loading
+    final pg = _pages[pageIdx];
+    if (!pg.audioReady || pg.audioPath == null) return;
+
+    // Dispose any stale pre-loaded player for a different page.
+    try { _preloadedPlayer?.dispose(); } catch (e) { debugPrint('⚠️ preloadedPlayer dispose: $e'); }
+    _preloadedPlayer  = null;
+    _preloadedPageIdx = -1;
+
+    _preloadingForIdx = pageIdx; // Mark as in-progress before first await.
+
+    debugPrint('🔄 Pre-loading audio for page ${pg.pageNum}…');
+    final p = AudioPlayer();
+    try {
+      await p.setSource(DeviceFileSource(pg.audioPath!));
+      if (mounted && _preloadingForIdx == pageIdx) {
+        _preloadedPlayer  = p;
+        _preloadedPageIdx = pageIdx;
+        _preloadingForIdx = -1;
+        debugPrint('✅ Pre-loaded page ${pg.pageNum}');
+      } else {
+        // Cancelled by a later request or widget disposed.
+        p.dispose();
+        if (_preloadingForIdx == pageIdx) _preloadingForIdx = -1;
+      }
+    } catch (e) {
+      debugPrint('⚠️ Pre-load page ${pg.pageNum} failed: $e');
+      p.dispose();
+      if (_preloadingForIdx == pageIdx) _preloadingForIdx = -1;
     }
   }
 
@@ -334,38 +381,39 @@ class _PracticePageState extends State<PracticePage>
     if (_jumpingToPage) return;
     setState(() { _jumpingToPage = true; });
 
-    // ★ FIX 2: Stop the ticker entirely during swap to prevent
-    //   _onTick from running with stale clock data once _jumpingToPage is cleared.
     _clock.stop();
     if (_ticker.isActive) _ticker.stop();
+
+    // Pull the pre-loaded player if it's ready for this exact page.
+    AudioPlayer? preloaded;
+    if (_preloadedPageIdx == pageIdx) {
+      preloaded         = _preloadedPlayer;
+      _preloadedPlayer  = null;
+      _preloadedPageIdx = -1;
+    }
 
     await _disposePlayer();
 
     _activePageIdx = pageIdx;
     final pageStart = _activePageOffset;
 
-    // ★ FIX 3: Force _songPosMs to the exact start of the new page.
     _songPosMs  = pageStart;
     _audioPosMs = pageStart;
     _clock.reset();
 
-    final ok = await _playPageAudio(pageIdx);
+    final ok = await _playPageAudio(pageIdx, preloadedPlayer: preloaded);
 
     if (ok) {
-      // _posSub listener already maintains _audioPosMs and the clock.
-      // Resetting them here would overwrite real audio progress and cause
-      // the animation to jump backward ("replay") when the next pos event fires.
-      // Just ensure the clock is ticking (no-op if _posSub already started it).
       _clock.start();
       setState(() {
         _jumpingToPage = false;
         _isPlaying     = true;
         _finished      = false;
       });
-      // Restart the ticker *after* all state is consistent.
       if (!_ticker.isActive) _ticker.start();
+      // Begin buffering the page after this one while this one plays.
+      _preloadAudio(pageIdx + 1);
     } else {
-      // Audio failed — stop
       if (_ticker.isActive) _ticker.stop();
       setState(() {
         _jumpingToPage = false;
@@ -388,6 +436,13 @@ class _PracticePageState extends State<PracticePage>
 
     _clock.stop();
     if (_ticker.isActive) _ticker.stop();
+
+    // Discard the pre-loaded player — user is jumping to a possibly different page.
+    try { _preloadedPlayer?.dispose(); } catch (e) { debugPrint('⚠️ preloadedPlayer dispose: $e'); }
+    _preloadedPlayer  = null;
+    _preloadedPageIdx = -1;
+    _preloadingForIdx = -1;
+
     await _disposePlayer();
 
     _activePageIdx = pageIdx;
@@ -400,7 +455,7 @@ class _PracticePageState extends State<PracticePage>
     final ok = await _playPageAudio(pageIdx);
 
     if (ok) {
-      _clock.start(); // no-op if _posSub already started it; guards the timeout path
+      _clock.start();
       setState(() {
         _isPlaying     = true;
         _finished      = false;
@@ -408,6 +463,8 @@ class _PracticePageState extends State<PracticePage>
         _mode = PracticeMode.watch;
       });
       if (!_ticker.isActive) _ticker.start();
+      // Pre-load the next page so subsequent auto-advance is seamless.
+      _preloadAudio(pageIdx + 1);
     } else {
       setState(() {
         _finished      = false;
@@ -461,6 +518,12 @@ class _PracticePageState extends State<PracticePage>
 
       debugPrint('✅ Page $pageNum: ${notes.length} notes, audio=${audioPath != null}');
 
+      // If we're actively playing the page just before this one, pre-load its
+      // audio now so the transition can resume instantly.
+      if (_isPlaying && _activePageIdx == _pages.length - 2) {
+        _preloadAudio(_pages.length - 1);
+      }
+
       if (_nextPageToLoad <= widget.totalPages && mounted) {
         _loadNextPage();
       }
@@ -496,6 +559,8 @@ class _PracticePageState extends State<PracticePage>
         _clock.start(); // no-op if _posSub already started it
         setState(() { _isPlaying = true; _jumpingToPage = false; });
         if (!_ticker.isActive) _ticker.start();
+        // Begin buffering the next page while page 1 is playing.
+        _preloadAudio(_activePageIdx + 1);
       } else {
         setState(() { _jumpingToPage = false; });
       }
