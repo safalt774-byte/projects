@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:projects/services/app_feedback_service.dart';
 import 'package:projects/widgets/app_page_route.dart';
 import 'pdf_view_page.dart';
+import 'server_settings_page.dart';
 
 /// Lets the user pick a PDF then navigates to PdfViewPage
 /// where they can preview it and tap Process to send to FastAPI.
@@ -33,6 +34,16 @@ class PdfPickerPage extends StatelessWidget {
         title: const Text('Pick Sheet Music'),
         backgroundColor: const Color(0xFF16213E),
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings, size: 22),
+            tooltip: 'Server Settings',
+            onPressed: () => Navigator.push(
+              context,
+              AppPageRoute.slideUp(page: const ServerSettingsPage()),
+            ),
+          ),
+        ],
       ),
       body: Center(
         child: Column(

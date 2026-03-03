@@ -47,6 +47,9 @@ app.*.map.json
 
 # Large binary files
 backend/FluidR3_GM.sf2
+backend/cloudflared.exe
+backend/tunnel_log.txt
+backend/test.txt
 *.sf2
 
 # Python

@@ -15,7 +15,14 @@ from fastapi.responses import FileResponse
 import mido
 from PyPDF2 import PdfReader, PdfWriter
 
+
 app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "API is running"}
+
+
 
 # Thread pool for running blocking Audiveris/FluidSynth processing
 # without blocking the async event loop (so audio serving still works)

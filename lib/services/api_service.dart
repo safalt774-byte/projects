@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/note_event.dart';
 import 'midi_mapper.dart';
 
@@ -38,12 +39,43 @@ class PageResult {
 }
 
 class ApiService {
-  static const String baseUrl =
-      'https://unreconsidered-tabatha-electively.ngrok-free.dev';
+  static const String _defaultUrl =
+      'https://sensors-bringing-eye-tsunami.trycloudflare.com';
 
-  static Map<String, String> get _headers => {
-    'ngrok-skip-browser-warning': 'true',
-  };
+  static String _baseUrl = _defaultUrl;
+  static const String _prefKey = 'server_base_url';
+
+  /// Current server URL.
+  static String get baseUrl => _baseUrl;
+
+  /// Load saved URL from disk (call once at app start).
+  static Future<void> init() async {
+    final prefs = await SharedPreferences.getInstance();
+    _baseUrl = prefs.getString(_prefKey) ?? _defaultUrl;
+  }
+
+  /// Update the server URL and persist it.
+  static Future<void> setBaseUrl(String url) async {
+    // Strip trailing slash
+    _baseUrl = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefKey, _baseUrl);
+  }
+
+  /// Test if the server is reachable.
+  static Future<bool> testConnection([String? url]) async {
+    final testUrl = url ?? _baseUrl;
+    try {
+      final response = await http.get(
+        Uri.parse('$testUrl/health'),
+      ).timeout(const Duration(seconds: 5));
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Map<String, String> get _headers => {};
 
   static List<NoteEvent> _parseNotes(List<dynamic> rawNotes) {
     final events = <NoteEvent>[];

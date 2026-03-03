@@ -273,23 +273,15 @@ class _PracticePageState extends State<PracticePage>
     final player = preloadedPlayer ?? AudioPlayer();
     _player = player;
 
-    final firstPos = Completer<void>();
-
     _posSub = player.onPositionChanged.listen((pos) {
       if (!mounted) return;
       final newPos = _activePageOffset + pos.inMilliseconds.toDouble();
-      // Compare against the *effective* position (anchor + interpolated clock)
-      // so that late-arriving or duplicate pos events can never snap the
-      // animation backward and cause the visible "replay".
+      // Only sync forward — never let a late event snap the animation backward
       final effectivePos = _audioPosMs + _clock.elapsedMilliseconds * _playbackRate;
       if (newPos >= effectivePos) {
         _audioPosMs = newPos;
         _clock.reset();
         _clock.start();
-      }
-      if (!firstPos.isCompleted) {
-        debugPrint('🔊 Audio confirmed: page ${pg.pageNum} @ ${pos.inMilliseconds}ms (global=${_audioPosMs}ms)');
-        firstPos.complete();
       }
     });
 
@@ -305,17 +297,16 @@ class _PracticePageState extends State<PracticePage>
       }
       await player.setPlaybackRate(_playbackRate);
       await player.resume();
-
-      await firstPos.future.timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => debugPrint('⚠️ Timeout waiting for audio — proceeding'),
-      );
-
-      debugPrint('▶️ Page ${pg.pageNum} CONFIRMED playing');
+      // ── Start clock & ticker IMMEDIATELY after resume() ──────
+      // Don't wait for the first onPositionChanged event (can take 1-3s on
+      // Android). The stopwatch drives the animation from t=0 right away.
+      // When real position events arrive they will sync the clock forward.
+      _clock.reset();
+      _clock.start();
+      debugPrint('▶️ Page ${pg.pageNum} playing (clock started immediately)');
       return true;
     } catch (e) {
       debugPrint('❌ _playPageAudio failed: $e');
-      if (!firstPos.isCompleted) firstPos.complete();
       return false;
     }
   }
@@ -362,9 +353,15 @@ class _PracticePageState extends State<PracticePage>
     _completeSub?.cancel();
     _posSub = null;
     _completeSub = null;
-    try { await _player?.stop(); } catch (_) {}
-    try { _player?.dispose(); } catch (_) {}
+    // Fire-and-forget: do NOT await stop/dispose.
+    // On Android, await _player?.stop() can block for 3-4 seconds which
+    // causes the animation to run without audio during page transitions.
+    final old = _player;
     _player = null;
+    Future.microtask(() async {
+      try { await old?.stop(); } catch (_) {}
+      try { old?.dispose(); } catch (_) {}
+    });
   }
 
   // ══════════════════════════════════════════════════════════
@@ -392,6 +389,7 @@ class _PracticePageState extends State<PracticePage>
     if (nextIdx < _pages.length && _pages[nextIdx].audioReady) {
       debugPrint('🎵 Auto-advancing to page ${nextIdx + 1}');
       _clock.stop();
+      if (_ticker.isActive) _ticker.stop();
       _autoAdvanceToPage(nextIdx);
       return;
     }
@@ -409,7 +407,7 @@ class _PracticePageState extends State<PracticePage>
     }
   }
 
-  /// Auto-advance: freeze animation, swap audio, un-freeze when confirmed.
+  /// Auto-advance: swap audio and restart animation immediately.
   Future<void> _autoAdvanceToPage(int pageIdx) async {
     if (_jumpingToPage) return;
     setState(() { _jumpingToPage = true; });
@@ -437,7 +435,8 @@ class _PracticePageState extends State<PracticePage>
     final ok = await _playPageAudio(pageIdx, preloadedPlayer: preloaded);
 
     if (ok) {
-      _clock.start();
+      // ── Un-freeze animation IMMEDIATELY — _playPageAudio already
+      //    started the clock inside resume(). Don't delay the ticker.
       setState(() {
         _jumpingToPage = false;
         _isPlaying     = true;
@@ -488,7 +487,7 @@ class _PracticePageState extends State<PracticePage>
     final ok = await _playPageAudio(pageIdx);
 
     if (ok) {
-      _clock.start();
+      // clock already started inside _playPageAudio
       setState(() {
         _isPlaying     = true;
         _finished      = false;
@@ -589,7 +588,7 @@ class _PracticePageState extends State<PracticePage>
       _songPosMs = _activePageOffset; _audioPosMs = _activePageOffset;
       final ok = await _playPageAudio(_activePageIdx);
       if (ok) {
-        _clock.start(); // no-op if _posSub already started it
+        // clock already started inside _playPageAudio
         setState(() { _isPlaying = true; _jumpingToPage = false; });
         if (!_ticker.isActive) _ticker.start();
         // Begin buffering the next page while page 1 is playing.
@@ -668,7 +667,6 @@ class _PracticePageState extends State<PracticePage>
       try {
         debugPrint('📥 WAV download $i/$retries: $url');
         final req = await HttpClient().getUrl(Uri.parse(url));
-        req.headers.set('ngrok-skip-browser-warning', 'true');
         final res = await req.close().timeout(const Duration(seconds: 180));
         if (res.statusCode != 200) { debugPrint('❌ HTTP ${res.statusCode}'); continue; }
         final bytes = await res.fold<List<int>>([], (prev, e) => prev..addAll(e));

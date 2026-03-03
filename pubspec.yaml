@@ -17,6 +17,7 @@ dependencies:
   # ── File & Storage ──────────────────────────────────────
   file_picker: ^8.0.0
   path_provider: ^2.1.2
+  shared_preferences: ^2.2.2
 
   # ── Network ─────────────────────────────────────────────
   http: ^1.2.0

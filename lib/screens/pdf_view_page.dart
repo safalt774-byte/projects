@@ -48,8 +48,19 @@ class _PdfViewPageState extends State<PdfViewPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() { _processing = false; _statusMessage = ''; });
+      final msg = e.toString();
+      final isConnectionError = msg.contains('SocketException') ||
+          msg.contains('Failed host lookup') ||
+          msg.contains('Connection refused') ||
+          msg.contains('timed out');
       ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$e'), backgroundColor: Colors.red, duration: const Duration(seconds: 6)));
+          SnackBar(
+            content: Text(isConnectionError
+                ? 'Cannot reach server. Go back → tap ⚙️ → update the server URL.'
+                : '$e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 6),
+          ));
     }
   }
 
