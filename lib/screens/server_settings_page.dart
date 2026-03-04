@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:projects/services/api_service.dart';
 
 /// Settings page where the user can set and test the backend server URL.
@@ -66,7 +67,7 @@ class _ServerSettingsPageState extends State<ServerSettingsPage> {
               Text(sanitized),
               const SizedBox(height: 8),
               const Text('Suggested correction:'),
-              Text(typoCorrection, style: const TextStyle(fontWeight: FontWeight.bold)),
+              Text(typoCorrection!, style: const TextStyle(fontWeight: FontWeight.bold)),
             ],
           ),
           actions: [
@@ -205,6 +206,66 @@ class _ServerSettingsPageState extends State<ServerSettingsPage> {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
               ),
+            ),
+
+            const SizedBox(height: 20),
+
+            // Current saved URL + actions
+            ValueListenableBuilder<String>(
+              valueListenable: ApiService.baseUrlNotifier,
+              builder: (context, savedUrl, _) {
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF16213E),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF2A3A5E)),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('Saved server URL', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                            const SizedBox(height: 6),
+                            Text(savedUrl, style: const TextStyle(color: Colors.white, fontSize: 14), overflow: TextOverflow.ellipsis),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Copy URL',
+                        icon: const Icon(Icons.copy, color: Colors.white70),
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: savedUrl));
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied URL to clipboard')));
+                        },
+                      ),
+                      IconButton(
+                        tooltip: 'Reset to default',
+                        icon: const Icon(Icons.refresh, color: Colors.white70),
+                        onPressed: () async {
+                          final confirm = await showDialog<bool>(
+                            context: context,
+                            builder: (ctx) => AlertDialog(
+                              title: const Text('Reset server URL?'),
+                              content: const Text('This will reset the saved server URL to the built-in default.'),
+                              actions: [
+                                TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+                                ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Reset')),
+                              ],
+                            ),
+                          );
+                          if (confirm == true) {
+                            await ApiService.resetToDefault();
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Server URL reset to default')));
+                          }
+                        },
+                      ),
+                    ],
+                  ),
+                );
+              },
             ),
 
             const SizedBox(height: 32),

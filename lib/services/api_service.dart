@@ -83,13 +83,15 @@ class ApiService {
     baseUrlNotifier.value = _baseUrl;
   }
 
+  /// Helper that returns a sanitized copy of the current in-memory base URL.
+  static String _cleanBaseUrl() => _sanitizeUrl(_baseUrl);
+
   /// Test if the server is reachable.
   static Future<bool> testConnection([String? url]) async {
-    final testUrl = url ?? _baseUrl;
+    final testUrl = url ?? _cleanBaseUrl();
     try {
-      final response = await http.get(
-        Uri.parse('${testUrl.endsWith('/') ? testUrl.substring(0, testUrl.length - 1) : testUrl}/health'),
-      ).timeout(const Duration(seconds: 5));
+      final uri = Uri.parse('${testUrl.endsWith('/') ? testUrl.substring(0, testUrl.length - 1) : testUrl}/health');
+      final response = await http.get(uri).timeout(const Duration(seconds: 5));
       return response.statusCode == 200;
     } catch (_) {
       return false;
@@ -112,7 +114,8 @@ class ApiService {
 
   /// Upload and process PDF. For large files, only page 1 is processed.
   static Future<SheetProcessResult> processSheet(File pdfFile) async {
-    final endpoint = '$baseUrl/process-sheet/';
+    final base = _cleanBaseUrl();
+    final endpoint = '$base/process-sheet/';
     // Helpful debug print to surface malformed URLs in logs during development.
     debugPrint('⤴️ processSheet endpoint: $endpoint');
     Uri uri;
@@ -148,7 +151,7 @@ class ApiService {
 
     return SheetProcessResult(
       notes: _parseNotes(json['notes'] as List),
-      audioUrl: '$baseUrl/${json['audioUrl']}',
+      audioUrl: '$base/${json['audioUrl']}',
       audioBase64: json['audioBase64'] as String?,
       jobId: json['jobId'] as String,
       totalPages: json['totalPages'] as int? ?? 1,
@@ -158,7 +161,8 @@ class ApiService {
 
   /// Start processing a page in the background (returns immediately)
   static Future<void> startPageProcessing(String jobId, int pageNum) async {
-    final uri = Uri.parse('$baseUrl/process-page/?job_id=$jobId&page_num=$pageNum');
+    final base = _cleanBaseUrl();
+    final uri = Uri.parse('$base/process-page/?job_id=$jobId&page_num=$pageNum');
 
     final response = await http.post(uri, headers: _headers).timeout(
       const Duration(seconds: 30),
@@ -186,7 +190,8 @@ class ApiService {
 
     while (DateTime.now().isBefore(deadline)) {
       try {
-        final uri = Uri.parse('$baseUrl/page-status/?job_id=$jobId&page_num=$pageNum');
+        final base = _cleanBaseUrl();
+        final uri = Uri.parse('$base/status/?job_id=$jobId&page_num=$pageNum'.replaceFirst('/status', '/page-status'));
 
         final response = await http.get(uri, headers: _headers).timeout(
           const Duration(seconds: 15),
@@ -200,7 +205,7 @@ class ApiService {
             debugPrint('✅ Page $pageNum processing complete');
             return PageResult(
               notes: _parseNotes(json['notes'] as List),
-              audioUrl: '$baseUrl/${json['audioUrl']}',
+              audioUrl: '$base/${json['audioUrl']}',
               audioBase64: json['audioBase64'] as String?,
               pageNum: json['pageNum'] as int,
             );
@@ -233,7 +238,8 @@ class ApiService {
   /// Request the backend to concatenate all per-page WAVs into one file.
   /// Returns the combined audio URL/base64 and per-page time offsets.
   static Future<CombinedAudioResult> combineAudio(String jobId) async {
-    final uri = Uri.parse('$baseUrl/combine-audio/?job_id=$jobId');
+    final base = _cleanBaseUrl();
+    final uri = Uri.parse('$base/combine-audio/?job_id=$jobId');
 
     final response = await http.get(uri, headers: _headers).timeout(
       const Duration(seconds: 60),
@@ -252,7 +258,7 @@ class ApiService {
     final offsets = (json['pageOffsetsMs'] as List).map((e) => (e as num).toDouble()).toList();
 
     return CombinedAudioResult(
-      audioUrl: '$baseUrl/${json['audioUrl']}',
+      audioUrl: '$base/${json['audioUrl']}',
       audioBase64: json['audioBase64'] as String?,
       pageOffsetsMs: offsets,
     );
