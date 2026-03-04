@@ -14,15 +14,26 @@ class _ServerSettingsPageState extends State<ServerSettingsPage> {
   late TextEditingController _urlController;
   bool _testing = false;
   bool? _reachable;
+  late final VoidCallback _notifierListener;
 
   @override
   void initState() {
     super.initState();
     _urlController = TextEditingController(text: ApiService.baseUrl);
+
+    // Update the TextField if baseUrl changes elsewhere in the app
+    _notifierListener = () {
+      final current = ApiService.baseUrlNotifier.value;
+      if (current != _urlController.text) {
+        _urlController.text = current;
+      }
+    };
+    ApiService.baseUrlNotifier.addListener(_notifierListener);
   }
 
   @override
   void dispose() {
+    ApiService.baseUrlNotifier.removeListener(_notifierListener);
     _urlController.dispose();
     super.dispose();
   }
@@ -31,14 +42,78 @@ class _ServerSettingsPageState extends State<ServerSettingsPage> {
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
 
+    // Preview and possibly correct the URL before testing/saving
+    final sanitized = ApiService.sanitizeUrl(url);
+
+    // Detect a common typo and propose a correction (e.g. trycloudfare -> trycloudflare)
+    String? typoCorrection;
+    final lower = sanitized.toLowerCase();
+    if (lower.contains('trycloudfare')) {
+      typoCorrection = sanitized.replaceAll(RegExp('(?i)trycloudfare'), 'trycloudflare');
+    }
+
+    // If we have a typoCorrection, ask the user to accept it first
+    String urlToTest = sanitized;
+    if (typoCorrection != null && typoCorrection != sanitized) {
+      final accept = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Did you mean:'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(sanitized),
+              const SizedBox(height: 8),
+              const Text('Suggested correction:'),
+              Text(typoCorrection, style: const TextStyle(fontWeight: FontWeight.bold)),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Use original')),
+            ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Use suggestion')),
+          ],
+        ),
+      );
+
+      if (accept == true) {
+        urlToTest = typoCorrection;
+      }
+    } else if (sanitized != url) {
+      // If sanitized differs from what the user pasted (e.g. trimmed spaces / added https), show a preview and ask to continue
+      final accept = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Preview server URL'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Original:'),
+              Text(url),
+              const SizedBox(height: 8),
+              const Text('Sanitized (will be saved):'),
+              Text(sanitized, style: const TextStyle(fontWeight: FontWeight.bold)),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+            ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Save sanitized')),
+          ],
+        ),
+      );
+
+      if (accept != true) return; // user canceled
+    }
+
     setState(() { _testing = true; _reachable = null; });
 
-    final ok = await ApiService.testConnection(url);
+    final ok = await ApiService.testConnection(urlToTest);
 
     if (!mounted) return;
 
     if (ok) {
-      await ApiService.setBaseUrl(url);
+      await ApiService.setBaseUrl(urlToTest);
       setState(() { _testing = false; _reachable = true; });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -49,9 +124,9 @@ class _ServerSettingsPageState extends State<ServerSettingsPage> {
     } else {
       setState(() { _testing = false; _reachable = false; });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('❌ Cannot reach server. Check URL and try again.'),
-          backgroundColor: Color(0xFFE53935),
+        SnackBar(
+          content: Text('❌ Cannot reach server at "$urlToTest". Check the URL and try again.'),
+          backgroundColor: const Color(0xFFE53935),
         ),
       );
     }

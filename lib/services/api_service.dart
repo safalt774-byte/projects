@@ -38,11 +38,18 @@ class PageResult {
   });
 }
 
+
 class ApiService {
+  // NOTE: removed accidental trailing space here which caused malformed hostnames
+  // Use a clean default (no trailing spaces). Users should replace this via Server Settings.
   static const String _defaultUrl =
-      'https://chan-ids-supplements-defendant.trycloudflare.com ';
+      'https://white-raymond-pdt-until.trycloudflare.com';
 
   static String _baseUrl = _defaultUrl;
+  /// Notifier that emits the current base URL whenever it changes. UI code
+  /// can listen to this to update immediately after a save.
+  static final ValueNotifier<String> baseUrlNotifier = ValueNotifier(_baseUrl);
+
   static const String _prefKey = 'server_base_url';
 
   /// Current server URL.
@@ -51,15 +58,29 @@ class ApiService {
   /// Load saved URL from disk (call once at app start).
   static Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
-    _baseUrl = prefs.getString(_prefKey) ?? _defaultUrl;
+    final raw = prefs.getString(_prefKey) ?? _defaultUrl;
+    // sanitize loaded value: trim, remove internal whitespace, ensure scheme, strip trailing slash
+    _baseUrl = _sanitizeUrl(raw);
+    // keep notifier in sync
+    baseUrlNotifier.value = _baseUrl;
   }
 
   /// Update the server URL and persist it.
   static Future<void> setBaseUrl(String url) async {
-    // Strip trailing slash
-    _baseUrl = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
+    // Sanitize input and persist
+    _baseUrl = _sanitizeUrl(url);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_prefKey, _baseUrl);
+    // notify listeners
+    baseUrlNotifier.value = _baseUrl;
+  }
+
+  /// Reset the saved base URL to the built-in default and notify listeners.
+  static Future<void> resetToDefault() async {
+    _baseUrl = _defaultUrl;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefKey, _baseUrl);
+    baseUrlNotifier.value = _baseUrl;
   }
 
   /// Test if the server is reachable.
@@ -67,7 +88,7 @@ class ApiService {
     final testUrl = url ?? _baseUrl;
     try {
       final response = await http.get(
-        Uri.parse('$testUrl/health'),
+        Uri.parse('${testUrl.endsWith('/') ? testUrl.substring(0, testUrl.length - 1) : testUrl}/health'),
       ).timeout(const Duration(seconds: 5));
       return response.statusCode == 200;
     } catch (_) {
@@ -91,7 +112,16 @@ class ApiService {
 
   /// Upload and process PDF. For large files, only page 1 is processed.
   static Future<SheetProcessResult> processSheet(File pdfFile) async {
-    final uri = Uri.parse('$baseUrl/process-sheet/');
+    final endpoint = '$baseUrl/process-sheet/';
+    // Helpful debug print to surface malformed URLs in logs during development.
+    debugPrint('⤴️ processSheet endpoint: $endpoint');
+    Uri uri;
+    try {
+      uri = Uri.parse(endpoint);
+    } catch (e) {
+      // Provide a friendly error that points the developer/user to the settings page
+      throw Exception('Invalid server endpoint: "$endpoint".\nPlease open Server Settings and verify the URL (no spaces, correct domain).\nParse error: $e');
+    }
     final request = http.MultipartRequest('POST', uri);
     request.headers.addAll(_headers);
     request.files.add(await http.MultipartFile.fromPath(
@@ -227,6 +257,24 @@ class ApiService {
       pageOffsetsMs: offsets,
     );
   }
+
+  /// Sanitizes a URL from prefs or user input: trims, removes internal whitespace,
+  /// removes non-printable chars, ensures it starts with http(s):// and strips trailing slash.
+  static String _sanitizeUrl(String raw) {
+    var s = raw.trim();
+    // remove any whitespace characters that might have been inserted
+    s = s.replaceAll(RegExp(r'\s+'), '');
+    // remove non-printable / control characters
+    s = s.replaceAll(RegExp(r'[^\x20-\x7E]'), '');
+    if (!RegExp(r'^https?://', caseSensitive: false).hasMatch(s)) {
+      s = 'https://' + s;
+    }
+    if (s.endsWith('/')) s = s.substring(0, s.length - 1);
+    return s;
+  }
+
+  /// Public wrapper for UI code to preview/validate a sanitized URL before saving.
+  static String sanitizeUrl(String raw) => _sanitizeUrl(raw);
 }
 
 class CombinedAudioResult {
