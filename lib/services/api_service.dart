@@ -51,9 +51,13 @@ class ApiService {
   static final ValueNotifier<String> baseUrlNotifier = ValueNotifier(_baseUrl);
 
   static const String _prefKey = 'server_base_url';
+  static const String _configRawPrefKey = 'server_config_raw_url';
+  static const String _tokenPrefKey = 'tunnel_token';
 
   /// Current server URL.
   static String get baseUrl => _baseUrl;
+
+  static String _tunnelToken = '';
 
   /// Load saved URL from disk (call once at app start).
   static Future<void> init() async {
@@ -61,8 +65,57 @@ class ApiService {
     final raw = prefs.getString(_prefKey) ?? _defaultUrl;
     // sanitize loaded value: trim, remove internal whitespace, ensure scheme, strip trailing slash
     _baseUrl = _sanitizeUrl(raw);
+    // load token and config raw url
+    _tunnelToken = prefs.getString(_tokenPrefKey) ?? '';
+    final configRaw = prefs.getString(_configRawPrefKey) ?? '';
+
+    // If baseUrl is equal to the built-in default or empty, and we have a config raw URL,
+    // attempt to fetch the ephemeral trycloudflare URL automatically.
+    if ((_baseUrl == _defaultUrl || _baseUrl.isEmpty) && configRaw.isNotEmpty) {
+      try {
+        final fetched = await fetchAndUpdateFromConfig(configRaw);
+        if (!fetched) {
+          // leave existing baseUrl as-is
+        }
+      } catch (_) {
+        // ignore failures — caller code can still call fetch manually
+      }
+    }
+
     // keep notifier in sync
     baseUrlNotifier.value = _baseUrl;
+  }
+
+  /// Persist config raw URL (e.g. gist raw URL where the current trycloudflare URL is stored)
+  static Future<void> setConfigRawUrl(String rawUrl) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_configRawPrefKey, rawUrl.trim());
+  }
+
+  /// Try to fetch the ephemeral tunnel URL from the provided config raw URL and update the base URL.
+  /// Returns true if updated successfully.
+  static Future<bool> fetchAndUpdateFromConfig(String configRawUrl) async {
+    try {
+      final uri = Uri.parse(configRawUrl.trim());
+      final resp = await http.get(uri).timeout(const Duration(seconds: 6));
+      if (resp.statusCode == 200) {
+        final body = resp.body.trim();
+        if (body.startsWith('http')) {
+          await setBaseUrl(body);
+          return true;
+        }
+      }
+    } catch (e) {
+      debugPrint('fetchAndUpdateFromConfig error: $e');
+    }
+    return false;
+  }
+
+  /// Persist tunnel token used by backend (X-Tunnel-Token header)
+  static Future<void> setTunnelToken(String token) async {
+    final prefs = await SharedPreferences.getInstance();
+    _tunnelToken = token.trim();
+    await prefs.setString(_tokenPrefKey, _tunnelToken);
   }
 
   /// Update the server URL and persist it.
@@ -91,14 +144,20 @@ class ApiService {
     final testUrl = url ?? _cleanBaseUrl();
     try {
       final uri = Uri.parse('${testUrl.endsWith('/') ? testUrl.substring(0, testUrl.length - 1) : testUrl}/health');
-      final response = await http.get(uri).timeout(const Duration(seconds: 5));
+      final response = await http.get(uri, headers: _headers).timeout(const Duration(seconds: 5));
       return response.statusCode == 200;
     } catch (_) {
       return false;
     }
   }
 
-  static Map<String, String> get _headers => {};
+  static Map<String, String> get _headers {
+    final h = <String, String>{};
+    if (_tunnelToken.isNotEmpty) {
+      h['X-Tunnel-Token'] = _tunnelToken;
+    }
+    return h;
+  }
 
   static List<NoteEvent> _parseNotes(List<dynamic> rawNotes) {
     final events = <NoteEvent>[];

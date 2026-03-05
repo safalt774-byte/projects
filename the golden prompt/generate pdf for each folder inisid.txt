@@ -1,0 +1,1 @@
+generate pdf for each folder iniside lib/, for example models.pdf and inside add the source code file of the note_event.dart: its source code. do this for each folder inside lib

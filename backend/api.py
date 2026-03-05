@@ -6,10 +6,10 @@ import time
 import asyncio
 import base64
 import wave
-import struct
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional, IO, cast
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -19,6 +19,19 @@ from PyPDF2 import PdfReader, PdfWriter
 
 
 app = FastAPI()
+
+# Read tunnel token from environment; default is a development token
+TUNNEL_TOKEN = os.getenv("TUNNEL_TOKEN", "dev-token")
+
+
+def check_token(token: str | None):
+    """Verify the X-Tunnel-Token header matches the configured token."""
+    if TUNNEL_TOKEN == "":
+        # empty token disables checking (not recommended) - treat as allow-all
+        return
+    if token is None or token != TUNNEL_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 @app.get("/")
 def root():
@@ -108,19 +121,27 @@ def process_pdf_to_notes_and_audio(pdf_path, work_dir, file_id):
     os.makedirs(work_dir, exist_ok=True)
 
     # Audiveris
-    process = subprocess.Popen(
-        [AUDIVERIS, "-batch", "-export", "-output", work_dir, pdf_path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    start = time.time()
-    while True:
-        if process.poll() is not None:
-            break
-        if time.time() - start > 300:
-            process.kill()
-            process.wait()
-            break
-        time.sleep(2)
+    # Use an explicit file object for os.devnull so type-checkers accept the IO[bytes] type
+    devnull_f = open(os.devnull, 'wb')
+    try:
+        process = subprocess.Popen(
+            [AUDIVERIS, "-batch", "-export", "-output", work_dir, pdf_path],
+            stdout=cast(IO[bytes], devnull_f), stderr=cast(IO[bytes], devnull_f)
+        )
+        start = time.time()
+        while True:
+            if process.poll() is not None:
+                break
+            if time.time() - start > 300:
+                process.kill()
+                process.wait()
+                break
+            time.sleep(2)
+    finally:
+        try:
+            devnull_f.close()
+        except Exception:
+            pass
 
     # Find MXL
     mxl_files = [os.path.join(r, f) for r, _, fs in os.walk(work_dir) for f in fs if f.endswith(".mxl")]
@@ -187,8 +208,11 @@ def read_wav_as_base64(wav_path):
 
 
 @app.get("/audio/{job_id}/{file_name}")
-async def get_audio(job_id: str, file_name: str):
+async def get_audio(job_id: str, file_name: str, x_tunnel_token: str | None = Header(None)):
     """Serve audio with correct WAV headers — supports Range requests for large files"""
+    # Verify header token
+    check_token(x_tunnel_token)
+
     print(f"🔊 Audio request: {job_id}/{file_name}")
 
     # Check in job root
@@ -225,7 +249,10 @@ async def get_audio(job_id: str, file_name: str):
 
 
 @app.post("/process-sheet/")
-async def process_sheet(file: UploadFile = File(...)):
+async def process_sheet(file: UploadFile = File(...), x_tunnel_token: str | None = Header(None)):
+    # Verify header token
+    check_token(x_tunnel_token)
+
     start_time = time.time()
     print(f"\n📥 RECEIVED: {file.filename}")
 
@@ -245,6 +272,7 @@ async def process_sheet(file: UploadFile = File(...)):
         f.write(file_content)
 
     # Count pages
+    reader: Optional[PdfReader] = None
     try:
         reader = PdfReader(pdf_path)
         num_pages = len(reader.pages)
@@ -278,6 +306,10 @@ async def process_sheet(file: UploadFile = File(...)):
             "totalPages": 1,
             "isMultiPage": False
         }
+
+    # Ensure reader is present before iterating pages
+    if reader is None:
+        raise HTTPException(status_code=500, detail="Could not read PDF pages")
 
     # ══════════════════════════════════════════════════════════
     # LARGE FILE: Split pages, process page 1 only
@@ -317,12 +349,15 @@ async def process_sheet(file: UploadFile = File(...)):
 
 
 @app.post("/process-page/")
-async def process_page(job_id: str, page_num: int):
+async def process_page(job_id: str, page_num: int, x_tunnel_token: str | None = Header(None)):
     """
     Start processing a page in the background.
     Returns immediately so ngrok doesn't timeout.
     Flutter polls /page-status/ to check when it's done.
     """
+    # Verify header token
+    check_token(x_tunnel_token)
+
     print(f"\n📄 Starting background processing: page {page_num} for {job_id}")
 
     job_dir = os.path.join(OUTPUT_DIR, job_id)
@@ -387,12 +422,15 @@ async def process_page(job_id: str, page_num: int):
 
 
 @app.get("/page-status/")
-async def page_status(job_id: str, page_num: int):
+async def page_status(job_id: str, page_num: int, x_tunnel_token: str | None = Header(None)):
     """
     Poll this endpoint to check if a page is done processing.
     Returns status: 'processing', 'done', or 'error'.
     When 'done', includes notes + audioUrl.
     """
+    # Verify header token
+    check_token(x_tunnel_token)
+
     task_key = f"{job_id}_page_{page_num}"
 
     if task_key not in _page_tasks:
@@ -409,12 +447,15 @@ async def page_status(job_id: str, page_num: int):
 
 
 @app.get("/combine-audio/")
-async def combine_audio(job_id: str):
+async def combine_audio(job_id: str, x_tunnel_token: str | None = Header(None)):
     """
     Concatenate all per-page WAV files into one combined WAV.
     Returns the combined file path and per-page duration offsets (in ms)
     so the Flutter app can use a SINGLE AudioPlayer for the entire song.
     """
+    # Verify header token
+    check_token(x_tunnel_token)
+
     job_dir = os.path.join(OUTPUT_DIR, job_id)
     if not os.path.exists(job_dir):
         raise HTTPException(status_code=404, detail="Job not found")
@@ -508,4 +549,3 @@ async def combine_audio(job_id: str):
 async def health():
     """Health check endpoint"""
     return {"status": "ok"}
-
