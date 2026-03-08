@@ -20,16 +20,25 @@ from PyPDF2 import PdfReader, PdfWriter
 
 app = FastAPI()
 
-# Read tunnel token from environment; default is a development token
-TUNNEL_TOKEN = os.getenv("TUNNEL_TOKEN", "dev-token")
+# Read tunnel token from environment. Default is empty which disables token checking in
+# development. To enable auth set the TUNNEL_TOKEN env var (e.g. TUNNEL_TOKEN=dev-token).
+TUNNEL_TOKEN = os.getenv("TUNNEL_TOKEN", "")
+
+print(f"🔐 Tunnel token is {'SET (auth enabled)' if TUNNEL_TOKEN else 'NOT SET (auth disabled)'}")
 
 
 def check_token(token: str | None):
     """Verify the X-Tunnel-Token header matches the configured token."""
+    # Log tokens for debugging (do not enable in production)
+    exp = '(empty)' if TUNNEL_TOKEN == '' else TUNNEL_TOKEN
+    print(f"🔐 check_token: expected={exp}, received={token}")
+
     if TUNNEL_TOKEN == "":
         # empty token disables checking (not recommended) - treat as allow-all
         return
+
     if token is None or token != TUNNEL_TOKEN:
+        print(f"❌ Token mismatch: expected={TUNNEL_TOKEN!r}, received={token!r}")
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -549,3 +558,12 @@ async def combine_audio(job_id: str, x_tunnel_token: str | None = Header(None)):
 async def health():
     """Health check endpoint"""
     return {"status": "ok"}
+
+
+@app.get("/auth-test/")
+async def auth_test(x_tunnel_token: str | None = Header(None)):
+    """Quick debugging endpoint that enforces the tunnel token via check_token.
+    Use this to confirm whether your client is sending the X-Tunnel-Token correctly.
+    """
+    check_token(x_tunnel_token)
+    return {"status": "ok", "auth": "passed"}

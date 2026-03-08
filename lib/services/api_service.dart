@@ -43,7 +43,7 @@ class ApiService {
   // NOTE: removed accidental trailing space here which caused malformed hostnames
   // Use a clean default (no trailing spaces). Users should replace this via Server Settings.
   static const String _defaultUrl =
-      'https://white-raymond-pdt-until.trycloudflare.com';
+      'https://avoid-kai-doctors-printed.trycloudflare.com';
 
   static String _baseUrl = _defaultUrl;
   /// Notifier that emits the current base URL whenever it changes. UI code
